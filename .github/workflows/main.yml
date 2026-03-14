@@ -5,12 +5,20 @@ jobs:
   ruff:
     runs-on: ubuntu-latest
     steps:
-      # Step 1: Mandatory - this copies your files into the runner
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Run Ruff specifically on main.py
-      - name: Run Ruff
+      - name: Install Ruff
         uses: astral-sh/ruff-action@v3
         with:
-          src: "launch.py"
+          version: "latest"
+          github-token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
+          # This prevents the action from running its default "check" 
+          # so we can run our custom fix/format commands below.
+          args: "--version"
+
+      - name: Fix linting issues in launch.py
+        run: ruff check --fix launch.py
+
+      - name: Format launch.py
+        run: ruff format launch.py
