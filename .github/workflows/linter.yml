@@ -1,12 +1,14 @@
 name: Ruff
 on: [push, pull_request]
+
 jobs:
   ruff:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Ruff on main.py
-      - uses: astral-sh/ruff-action@v3
-        with:
-          src: "./src/main.py" # Update this to the actual path
+      - name: Checkout code
+        uses: actions/checkout@v4
 
+      - name: Run Ruff on main.py
+        uses: astral-sh/ruff-action@v3
+        with:
+          src: "main.py"
