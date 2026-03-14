@@ -6,7 +6,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Ruff on main.py
-        uses: astral-sh/ruff-action@v3
+      - uses: astral-sh/ruff-action@v3
         with:
-          # Specify only the single file here
-          src: "./main.py"
+          src: "./src/main.py" # Update this to the actual path
+
