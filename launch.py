@@ -1,7 +1,17 @@
 from pathlib import Path
 from ansi2html import Ansi2HTMLConverter
 from flask import Flask, request, render_template_string, jsonify, Response
-import subprocess, sys, socket, time, re, signal, shutil, threading, html, logging, os
+import subprocess
+import sys
+import socket
+import time
+import re
+import signal
+import shutil
+import threading
+import html
+import logging
+import os
 
 app = Flask(__name__)
 
@@ -11,10 +21,9 @@ def escape_html(s):
 
 # --- CONFIGURATION ---
 VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
-FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
-PASS_KEY = "1234"
-# SERVER_IP = "77.103.184.72"
-SERVER_IP = "eu.chickencraft.nl"
+FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"] # Add forbidden usernames
+PASS_KEY = "1234" # Add forbidden username password
+SERVER_IP = "eu.chickencraft.nl" # Add server IP for quick join or disable it with ""
 JVM_OPTS = "-Xmx3G -Xms3G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M -XX:+AlwaysPreTouch -XX:+ParallelRefProcEnabled -XX:+DisableExplicitGC"
 
 # Thread-safe process tracking
