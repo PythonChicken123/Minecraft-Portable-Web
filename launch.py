@@ -14,7 +14,6 @@ import logging
 import os
 import importlib.util
 
-_cleaned_up = False
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -454,7 +453,7 @@ HTML_TEMPLATE = r"""
 
     <div class="controls">
         <label class="switch">
-            <input type="checkbox" id="bgToggle" onchange="toggleBackground()">
+            <input type="checkbox" id="bgToggle">
             <span class="slider"></span>
         </label>
         <span class="control-label">Ambient Mode</span>
@@ -472,15 +471,15 @@ HTML_TEMPLATE = r"""
             </div>
             {% if error %}<div style="color:#ff5555; font-size:11px; margin-bottom:20px; font-weight:800; text-transform:uppercase;">{{ error }}</div>{% endif %}
             
-            <form id="launchForm" onsubmit="event.preventDefault(); startLaunch();">
+            <form id="launchForm">
                 <div class="input-wrapper">
-                    <input type="text" id="username" name="username" placeholder="Username" autofocus oninput="checkForbidden()" autocomplete="off">
+                    <input type="text" id="username" name="username" placeholder="Username" autocomplete="off">
                     <div id="forbidden-warn" style="display:none; color:#ff5555; font-size:9px; margin-top:8px; font-weight:800; text-align:left;">[!] RESTRICTED IDENTITY DETECTED</div>
                 </div>
 
                 <div id="pass-container" class="input-wrapper" style="display:none;">
                     <input type="password" id="password" name="password" placeholder="SECURE_KEY">
-                    <div class="toggle-pass" onmousedown="showPass()" onmouseup="hidePass()" onmouseleave="hidePass()">
+                    <div class="toggle-pass">
                         <svg id="eyeIcon" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" /></svg>
                     </div>
                 </div>
@@ -496,262 +495,311 @@ HTML_TEMPLATE = r"""
     </div>
 
     <div class="watermark">PORTABLE_MC // APEX_V6.5</div>
- 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+    <!-- Main application code – defines initApp -->
     <script>
-        const forbidden = {{ forbidden_list | tojson }};
-        const consoleNode = document.getElementById('console-container');
-        const loginCard = document.getElementById('login-card');
-        const launchBtn = document.getElementById('launchBtn');
-        const logOutput = document.getElementById('log-output');
-
-        const socket = io({
-            reconnection: true,
-            reconnectionAttempts: Infinity,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            timeout: 2000,
-            pingInterval: 1000
-        });
-
-        let currentEventSource = null;
-        let fadeTimer = null;
-        let currentGroup = null;
-        let lastLineColor = '#ffffff';
-        let lastCheckedUser = '';
-        let minecraftStatusInterval = null;  // Track interval for Minecraft status
-
-        // WebSocket event handlers
-        socket.on('connect', function() {
-            console.log('WebSocket connected');
-            launchBtn.disabled = false;
-            launchBtn.innerText = "INITIALIZE CORE";
-            document.getElementById('flask-status-text').innerText = 'Connected';
-            document.getElementById('flask-status-text').style.color = '#2ecc71';
-            
-            // Check Minecraft server status immediately
-            socket.emit('ping_minecraft');
-            
-            // Set up interval for periodic Minecraft status checks (every 10 seconds)
-            if (minecraftStatusInterval) clearInterval(minecraftStatusInterval);
-            minecraftStatusInterval = setInterval(() => {
-                if (socket.connected) {
-                    socket.emit('ping_minecraft');
-                }
-            }, 10000);
-        });
-
-        socket.on('disconnect', function() {
-            console.log('WebSocket disconnected');
-            launchBtn.disabled = true;
-            launchBtn.innerText = "CORE OFFLINE";
-            document.getElementById('flask-status-text').innerText = 'Disconnected';
-            document.getElementById('flask-status-text').style.color = '#e74c3c';
-            document.getElementById('statusDot').className = 'status-dot offline';
-            
-            // Clear Minecraft status interval when disconnected
-            if (minecraftStatusInterval) {
-                clearInterval(minecraftStatusInterval);
-                minecraftStatusInterval = null;
-            }
-        });
-
-        socket.on('core_status', function(data) {
-            if (!data.online) {
-                launchBtn.disabled = true;
-                launchBtn.innerText = "CORE OFFLINE";
-                document.getElementById('flask-status-text').innerText = 'Disconnected';
-                document.getElementById('flask-status-text').style.color = '#e74c3c';
-                document.getElementById('statusDot').className = 'status-dot offline';
-            }
-        });
-
-        socket.on('minecraft_status', function(data) {
-            const dot = document.getElementById('statusDot');
-            if (data.online) {
-                dot.className = 'status-dot online';
-            } else {
-                dot.className = 'status-dot offline';
-            }
-        });
-
-        function appendLog(htmlContent) {
-            const line = document.createElement('div');
-            line.className = 'log-line';
-            line.innerHTML = htmlContent;
-
-            const rawText = (line.textContent || line.innerText || '').trim();
-            const isNewLogLine = /^\[\d\d:\d\d:\d\d\]/.test(rawText);
-
-            if (isNewLogLine) {
-                currentGroup = document.createElement('div');
-                currentGroup.className = 'log-group';
-                logOutput.appendChild(currentGroup);
-
-                const coloredSpans = line.querySelectorAll('span[style*="color"]');
-                if (coloredSpans.length > 0) {
-                    const lastSpan = coloredSpans[coloredSpans.length - 1];
-                    lastLineColor = lastSpan.style.color;
-                } else {
-                    lastLineColor = '#ffffff';
-                }
-            } else if (rawText.length > 0) {
-                line.classList.add('continuation-line');
-                line.style.color = lastLineColor;
-            }
-
-            if (!currentGroup) {
-                currentGroup = document.createElement('div');
-                currentGroup.className = 'log-group';
-                logOutput.appendChild(currentGroup);
-            }
-            currentGroup.appendChild(line);
-
-            consoleNode.scrollTop = consoleNode.scrollHeight;
-            triggerScrollFade();
-        }
-
-        function triggerScrollFade() {
-            consoleNode.classList.add('active-scroll');
-            if (fadeTimer) clearTimeout(fadeTimer);
-            fadeTimer = setTimeout(() => consoleNode.classList.remove('active-scroll'), 1500);
-        }
-
-        consoleNode.onclick = function() {
-            if (!launchBtn.disabled) {
-                consoleNode.style.cursor = "default";
-                loginCard.style.display = "block";
-                consoleNode.style.display = "none";
-            } else {
-                // If the button is disabled (e.g., server offline), still show login card
-                loginCard.style.display = "block";
-                consoleNode.style.display = "none";
-                // Ensure button shows correct text (it should already be set by disconnect)
-            }
-        };
-
-        consoleNode.addEventListener('scroll', triggerScrollFade);
-        consoleNode.addEventListener('mousemove', triggerScrollFade);
-
-        function showPass() { 
-            document.getElementById('password').type = "text"; 
-            document.getElementById('eyeIcon').style.fill = "#2563eb"; 
-        }
-        function hidePass() { 
-            document.getElementById('password').type = "password"; 
-            document.getElementById('eyeIcon').style.fill = "rgba(255, 255, 255, 0.6)"; 
-        }
-
-        function checkForbidden() {
+        function initApp() {
+            const forbidden = {{ forbidden_list | tojson }};
+            const consoleNode = document.getElementById('console-container');
+            const loginCard = document.getElementById('login-card');
+            const launchBtn = document.getElementById('launchBtn');
+            const logOutput = document.getElementById('log-output');
             const userField = document.getElementById('username');
-            if (!userField) return;
-
-            const currentUser = userField.value.trim().toLowerCase();
-            
-            if (currentUser === lastCheckedUser) return;
-            lastCheckedUser = currentUser;
-
-            console.log(`[checkForbidden] username: "${currentUser}"`);
-
-            const isMatch = forbidden.some(name => name.toLowerCase() === currentUser);
-
+            const passField = document.getElementById('password');
             const passContainer = document.getElementById('pass-container');
             const warnText = document.getElementById('forbidden-warn');
-            const passInput = document.getElementById('password');
+            const bgToggle = document.getElementById('bgToggle');
+            const statusDot = document.getElementById('statusDot');
+            const flaskStatusText = document.getElementById('flask-status-text');
 
-            if (isMatch) {
-                passContainer.style.display = "block";
-                warnText.style.display = "block";
-                passInput.required = true;
-                void passContainer.offsetHeight;
-                void warnText.offsetHeight;
-                document.body.style.display = 'none';
-                document.body.style.display = '';
-            } else {
-                passContainer.style.display = "none";
-                warnText.style.display = "none";
-                passInput.required = false;
-                void passContainer.offsetHeight;
-                void warnText.offsetHeight;
-                document.body.style.display = 'none';
-                document.body.style.display = '';
-            }
-        }
+            const socket = io({
+                reconnection: true,
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 2000
+            });
 
-        async function startLaunch() {
-            if (currentEventSource) {
-                currentEventSource.close();
-                currentEventSource = null;
-            }
+            let currentEventSource = null;
+            let fadeTimer = null;
+            let currentGroup = null;
+            let lastLineColor = '#ffffff';
+            let lastCheckedUser = '';
+            let minecraftStatusInterval = null;
+            let shouldReloadOnReconnect = false;
+            let forbiddenInterval = null;
 
-            const user = document.getElementById('username').value;
-            const pass = document.getElementById('password').value;
-
-            localStorage.setItem('last_mc_user', user);
-
-            launchBtn.disabled = true;
-            launchBtn.innerText = "INITIALIZING...";
-
-            loginCard.style.display = "none";
-            consoleNode.style.display = "block";
-            logOutput.innerHTML = "";
-            currentGroup = null;
-            lastLineColor = '#ffffff';
-
-            const eventSource = new EventSource(`/stream?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
-            currentEventSource = eventSource;
-
-            eventSource.onmessage = function(e) {
-                if (e.data === "CLOSE") {
-                    setTimeout(() => {
-                        eventSource.close();
-                        currentEventSource = null;
-                        consoleNode.style.cursor = "pointer";
-                        launchBtn.disabled = false;
-                        launchBtn.innerText = "INITIALIZE CORE";
-                    }, 500);
-                    return;
+            // --- WebSocket event handlers ---
+            socket.on('connect', function() {
+                console.log('WebSocket connected');
+                if (shouldReloadOnReconnect) {
+                    if (!sessionStorage.getItem('reloaded')) {
+                        sessionStorage.setItem('reloaded', 'true');
+                        console.log('Server reconnected – reloading page for updates');
+                        window.location.reload();
+                        return; // Stop further execution because page will reload
+                    } else {
+                        console.log('Server reconnected – reload already performed this session, continuing without reload');
+                        // Do not return; proceed with normal connection setup
+                    }
                 }
-                appendLog(e.data);
-            };
-
-            eventSource.onerror = function() {
-                eventSource.close();
-                currentEventSource = null;
-                appendLog('[SYSTEM] CONNECTION LOST');
                 launchBtn.disabled = false;
                 launchBtn.innerText = "INITIALIZE CORE";
-            };
-        }
+                flaskStatusText.innerText = 'Connected';
+                flaskStatusText.style.color = '#2ecc71';
+                socket.emit('ping_minecraft');
+                if (minecraftStatusInterval) clearInterval(minecraftStatusInterval);
+                minecraftStatusInterval = setInterval(() => {
+                    if (socket.connected) socket.emit('ping_minecraft');
+                }, 10000);
+            });
 
-        function toggleBackground() {
-            const active = document.getElementById('bgToggle').checked;
-            document.getElementById('bodyNode').classList.toggle('show-bg', active);
-            localStorage.setItem('ambient_mode', active ? 'on' : 'off');
-        }
+            socket.on('disconnect', function(reason) {
+                console.log('WebSocket disconnected:', reason);
+                launchBtn.disabled = true;
+                launchBtn.innerText = "CORE OFFLINE";
+                flaskStatusText.innerText = 'Disconnected';
+                flaskStatusText.style.color = '#e74c3c';
+                statusDot.className = 'status-dot offline';
+                if (minecraftStatusInterval) {
+                    clearInterval(minecraftStatusInterval);
+                    minecraftStatusInterval = null;
+                }
+                shouldReloadOnReconnect = true;
+            });
 
-        window.onload = function() {
-            const userField = document.getElementById('username');
+            socket.on('minecraft_status', function(data) {
+                statusDot.className = data.online ? 'status-dot online' : 'status-dot offline';
+            });
 
-            const savedUser = localStorage.getItem('last_mc_user');
-            if (savedUser) {
-                userField.value = savedUser;
+            // --- Core UI functions ---
+            function appendLog(htmlContent) {
+                const line = document.createElement('div');
+                line.className = 'log-line';
+                line.innerHTML = htmlContent;
+
+                const rawText = (line.textContent || line.innerText || '').trim();
+                const isNewLogLine = /^\[\d\d:\d\d:\d\d\]/.test(rawText);
+
+                if (isNewLogLine) {
+                    currentGroup = document.createElement('div');
+                    currentGroup.className = 'log-group';
+                    logOutput.appendChild(currentGroup);
+
+                    const coloredSpans = line.querySelectorAll('span[style*="color"]');
+                    if (coloredSpans.length > 0) {
+                        const lastSpan = coloredSpans[coloredSpans.length - 1];
+                        lastLineColor = lastSpan.style.color;
+                    } else {
+                        lastLineColor = '#ffffff';
+                    }
+                } else if (rawText.length > 0) {
+                    line.classList.add('continuation-line');
+                    line.style.color = lastLineColor;
+                }
+
+                if (!currentGroup) {
+                    currentGroup = document.createElement('div');
+                    currentGroup.className = 'log-group';
+                    logOutput.appendChild(currentGroup);
+                }
+                currentGroup.appendChild(line);
+
+                consoleNode.scrollTop = consoleNode.scrollHeight;
+                triggerScrollFade();
             }
 
-            const savedMode = localStorage.getItem('ambient_mode');
-            if (savedMode === 'on' || savedMode === null) {
-                document.getElementById('bgToggle').checked = true;
-                document.getElementById('bodyNode').classList.add('show-bg');
+            function triggerScrollFade() {
+                consoleNode.classList.add('active-scroll');
+                if (fadeTimer) clearTimeout(fadeTimer);
+                fadeTimer = setTimeout(() => consoleNode.classList.remove('active-scroll'), 1500);
             }
 
-            // Essential: detect autofill – needs polling because browser doesn't fire events
+            // --- UI event handlers ---
+            function showPass() {
+                passField.type = "text";
+                document.getElementById('eyeIcon').style.fill = "#2563eb";
+            }
+
+            function hidePass() {
+                passField.type = "password";
+                document.getElementById('eyeIcon').style.fill = "rgba(255, 255, 255, 0.6)";
+            }
+
+            function checkForbidden() {
+                const currentUser = userField.value.trim().toLowerCase();
+                if (currentUser === lastCheckedUser) return;
+                lastCheckedUser = currentUser;
+                console.log(`[checkForbidden] username: "${currentUser}"`);
+                const isMatch = forbidden.some(name => name.toLowerCase() === currentUser);
+
+                if (isMatch) {
+                    passContainer.style.display = "block";
+                    warnText.style.display = "block";
+                    passField.required = true;
+                    void passContainer.offsetHeight;
+                    void warnText.offsetHeight;
+                } else {
+                    passContainer.style.display = "none";
+                    warnText.style.display = "none";
+                    passField.required = false;
+                    void passContainer.offsetHeight;
+                    void warnText.offsetHeight;
+                }
+            }
+
+            async function startLaunch() {
+                if (currentEventSource) {
+                    currentEventSource.close();
+                    currentEventSource = null;
+                }
+                const user = userField.value;
+                const pass = passField.value;
+                localStorage.setItem('last_mc_user', user);
+
+                launchBtn.disabled = true;
+                launchBtn.innerText = "INITIALIZING...";
+                loginCard.style.display = "none";
+                consoleNode.style.display = "block";
+                logOutput.innerHTML = "";
+                currentGroup = null;
+                lastLineColor = '#ffffff';
+
+                const eventSource = new EventSource(`/stream?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
+                currentEventSource = eventSource;
+
+                eventSource.onmessage = function(e) {
+                    if (e.data === "CLOSE") {
+                        setTimeout(() => {
+                            eventSource.close();
+                            currentEventSource = null;
+                            consoleNode.style.cursor = "pointer";
+                            launchBtn.disabled = false;
+                            launchBtn.innerText = "INITIALIZE CORE";
+                        }, 500);
+                        return;
+                    }
+                    appendLog(e.data);
+                };
+
+                eventSource.onerror = function() {
+                    eventSource.close();
+                    currentEventSource = null;
+                    appendLog('[SYSTEM] CONNECTION LOST');
+                    launchBtn.disabled = false;
+                    launchBtn.innerText = "INITIALIZE CORE";
+                };
+            }
+
+            function toggleBackground() {
+                const active = bgToggle.checked;
+                document.getElementById('bodyNode').classList.toggle('show-bg', active);
+                localStorage.setItem('ambient_mode', active ? 'on' : 'off');
+            }
+
+            // --- Set up event listeners ---
+            document.getElementById('launchForm').addEventListener('submit', (e) => {
+                e.preventDefault();
+                startLaunch();
+            });
+
             userField.addEventListener('input', checkForbidden);
             userField.addEventListener('change', checkForbidden);
             userField.addEventListener('paste', () => setTimeout(checkForbidden, 10));
-            setInterval(checkForbidden, 100);  // Only interval kept for autofill
+
+            const togglePass = document.querySelector('.toggle-pass');
+            togglePass.addEventListener('mousedown', showPass);
+            togglePass.addEventListener('mouseup', hidePass);
+            togglePass.addEventListener('mouseleave', hidePass);
+
+            bgToggle.addEventListener('change', toggleBackground);
+
+            consoleNode.addEventListener('click', function() {
+                loginCard.style.display = "block";
+                consoleNode.style.display = "none";
+                if (socket.connected) {
+                    launchBtn.disabled = false;
+                    launchBtn.innerText = "INITIALIZE CORE";
+                } else {
+                    launchBtn.disabled = true;
+                    launchBtn.innerText = "CORE OFFLINE";
+                }
+            });
+
+            consoleNode.addEventListener('scroll', triggerScrollFade);
+            consoleNode.addEventListener('mousemove', triggerScrollFade);
+
+            const savedUser = localStorage.getItem('last_mc_user');
+            if (savedUser) userField.value = savedUser;
+            const savedMode = localStorage.getItem('ambient_mode');
+            if (savedMode === 'on' || savedMode === null) {
+                bgToggle.checked = true;
+                document.getElementById('bodyNode').classList.add('show-bg');
+            }
+
+            forbiddenInterval = setInterval(checkForbidden, 500);
+            window.addEventListener('beforeunload', function() {
+                clearInterval(forbiddenInterval);
+            });
+
             window.addEventListener('focus', checkForbidden);
             checkForbidden();
-        };
+        }
+    </script>
+
+    <!-- Socket.IO version dynamic fallback loader -->
+    <script>
+        (function loadSocketIO() {
+            const versions = [
+                '4.8.3', '4.7.2', '4.6.2', '4.5.4', '4.4.4',
+                '4.3.5', '4.2.2', '4.1.2', '4.0.1'
+            ];
+            let currentIndex = -1;
+
+            function tryNext() {
+                if (currentIndex === -1) {
+                    console.log('Attempting to load local socket.io.js...');
+                    loadScript('{{ url_for("static", filename="socket.io.js") }}');
+                } else if (currentIndex < versions.length) {
+                    const ver = versions[currentIndex];
+                    console.log(`Attempting CDN version ${ver}...`);
+                    loadScript(`https://cdn.socket.io/${ver}/socket.io.min.js`);
+                } else {
+                    console.error('All Socket.IO sources failed.');
+                    const markSocketIoFailure = function() {
+                        const btn = document.getElementById('launchBtn');
+                        if (btn) {
+                            btn.disabled = true;
+                            btn.innerText = 'SOCKET.IO LOAD FAILED';
+                        }
+                    };
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', markSocketIoFailure);
+                    } else {
+                        // DOM is already parsed; update on next tick to ensure button exists
+                        setTimeout(markSocketIoFailure, 0);
+                    }
+                    return;
+                }
+                currentIndex++;
+            }
+
+            function loadScript(src) {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = function() {
+                    console.log(`✅ Successfully loaded: ${src}`);
+                    initApp();
+                };
+                script.onerror = function() {
+                    console.warn(`❌ Failed to load: ${src}`);
+                    tryNext();
+                };
+                document.head.appendChild(script);
+            }
+
+            tryNext();
+        })();
     </script>
 </body>
 </html>
@@ -945,7 +993,7 @@ def stream():
                         yield f"data: {disc_msg}\n\n"
                     except (BrokenPipeError, OSError):
                         pass
-                    break  # Exit loop; process will be terminated in finally
+                    break
 
                 line = process.stdout.readline()
                 if not line:
@@ -996,30 +1044,37 @@ def stream():
         finally:
             if process:
                 process.stdout.close()
-                # Use the robust process tree killer
                 kill_process_tree(process)
             with processes_lock:
                 if user in active_processes:
                     del active_processes[user]
                     logging.info(f"Removed process entry for {user}")
 
-            # Send session end messages (converted)
-            ended_msg = ansi_converter.convert(
-                escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
-            ).strip()
-            tip_msg = ansi_converter.convert(
-                escape_html(
-                    "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
-                ),
-                full=False,
-            ).strip()
+            # Session messages – errors are ignored, we still want CLOSE
             try:
+                ended_msg = ansi_converter.convert(
+                    escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
+                ).strip()
+                tip_msg = ansi_converter.convert(
+                    escape_html(
+                        "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
+                    ),
+                    full=False,
+                ).strip()
                 yield f"data: {ended_msg}\n\n"
                 yield f"data: {tip_msg}\n\n"
-            except Exception:
+            except GeneratorExit:
+                # Generator is being closed – exit without yielding further
                 pass
+            except Exception:
+                # Log or ignore – but proceed to CLOSE
+                pass
+
+            # Always try to send CLOSE, even if above failed
             try:
                 yield "data: CLOSE\n\n"
+            except GeneratorExit:
+                pass
             except Exception:
                 pass
 
