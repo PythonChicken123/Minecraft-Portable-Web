@@ -12,13 +12,9 @@ jobs:
         uses: astral-sh/ruff-action@v3
         with:
           version: "latest"
-          github-token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
-          # This prevents the action from running its default "check" 
-          # so we can run our custom fix/format commands below.
-          args: "--version"
 
-      - name: Fix linting issues in launch.py
-        run: ruff check --fix launch.py
+      - name: Run Ruff linting
+        run: ruff check launch.py
 
-      - name: Format launch.py
-        run: ruff format launch.py
+      - name: Check Ruff formatting
+        run: ruff format --check launch.py
