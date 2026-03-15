@@ -12,6 +12,7 @@ import threading
 import html
 import logging
 import os
+import importlib.util
 
 app = Flask(__name__)
 
@@ -717,16 +718,13 @@ def ping():
         return jsonify(online=False)
 
 @app.route("/stream")
-def stream():	
+def stream():
     # --- PORTABLEMC AVAILABILITY CHECK (simplified and reliable) ---
     def is_portablemc_available():
         if shutil.which("portablemc"):
             return True
-        try:
-            import portablemc
-            return True
-        except ImportError:
-            return False
+        # Check if the module can be imported without actually importing it
+        return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
         def error_gen():
@@ -859,7 +857,7 @@ def stream():
                     ).strip()
                     try:
                         yield f"data: {disc_msg}\n\n"
-                    except:
+                    except (BrokenPipeError, OSError):
                         pass
                     process.terminate()
                     break
@@ -901,13 +899,13 @@ def stream():
             if not closed_event.is_set():
                 try:
                     yield f"data: \x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m\n\n"
-                except:
+                except Exception:
                     pass
         except Exception as e:
             if not closed_event.is_set():
                 try:
                     yield f"data: [SYSTEM ERROR] {str(e)}\n\n"
-                except:
+                except Exception:
                     pass
         finally:
             if process:
@@ -933,12 +931,12 @@ def stream():
             try:
                 yield f"data: {ended_msg}\n\n"
                 yield f"data: {tip_msg}\n\n"
-            except:
+            except Exception:
                 pass
 
             try:
                 yield "data: CLOSE\n\n"
-            except:
+            except Exception:
                 pass
 
     response = Response(generate(), mimetype="text/event-stream")
