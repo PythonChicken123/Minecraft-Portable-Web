@@ -9,7 +9,6 @@ import re
 import signal
 import shutil
 import threading
-import html
 import logging
 import os
 import importlib.util
