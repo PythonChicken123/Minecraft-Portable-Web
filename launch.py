@@ -17,12 +17,14 @@ import importlib.util
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+
 def escape_html(s):
     """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
-    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 # --- CONFIGURATION ---
-VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
+VALID_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,16}$")
 FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
 PASS_KEY = "1234"
 SERVER_IP = "77.103.184.72"
@@ -798,26 +800,29 @@ HTML_TEMPLATE = r"""
 
 # --- ROUTES ---
 
-@socketio.on('connect')
+
+@socketio.on("connect")
 def handle_connect():
     global connected_clients
     with clients_lock:
         connected_clients += 1
         client_id = request.sid
-        print(f'Client connected: {client_id} (Total: {connected_clients})')
-    
-    # Send initial status
-    emit('status', {'core': 'online', 'minecraft': 'checking'})
+        print(f"Client connected: {client_id} (Total: {connected_clients})")
 
-@socketio.on('disconnect')
+    # Send initial status
+    emit("status", {"core": "online", "minecraft": "checking"})
+
+
+@socketio.on("disconnect")
 def handle_disconnect():
     global connected_clients
     with clients_lock:
         connected_clients -= 1
         client_id = request.sid
-        print(f'Client disconnected: {client_id} (Total: {connected_clients})')
+        print(f"Client disconnected: {client_id} (Total: {connected_clients})")
 
-@socketio.on('ping_minecraft')
+
+@socketio.on("ping_minecraft")
 def handle_ping_minecraft():
     """Check Minecraft server status on demand"""
     try:
@@ -825,9 +830,10 @@ def handle_ping_minecraft():
         s.settimeout(1.5)
         s.connect((SERVER_IP, 25565))
         s.close()
-        emit('minecraft_status', {'online': True})
+        emit("minecraft_status", {"online": True})
     except Exception:
-        emit('minecraft_status', {'online': False})
+        emit("minecraft_status", {"online": False})
+
 
 @app.route("/ping")
 def ping():
@@ -842,6 +848,7 @@ def ping():
         # Always return 200 OK with online=false
         return jsonify(online=False), 200
 
+
 @app.route("/stream")
 def stream():
     # --- PORTABLEMC AVAILABILITY CHECK ---
@@ -851,10 +858,12 @@ def stream():
         return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
+
         def error_gen():
             yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
             yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- GET USER INPUT ---
@@ -863,15 +872,18 @@ def stream():
 
     # --- VALIDATIONS (same as before) ---
     if not user:
+
         def error_gen():
             msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     if not VALID_USERNAME_REGEX.match(user):
+
         def error_gen():
             msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
             msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
@@ -882,33 +894,38 @@ def stream():
             yield f"data: {html1}\n\n"
             yield f"data: {html2}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     user_lower = user.lower()
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
     if user_lower in forbidden_lower and password != PASS_KEY:
+
         def error_gen():
             msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
+
             def error_gen():
                 lines = [
                     "\x1b[91m[!] CORE BUSY\x1b[0m",
                     "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                    "\x1b[90mPlease close the game before launching again.\x1b[0m"
+                    "\x1b[90mPlease close the game before launching again.\x1b[0m",
                 ]
                 for line in lines:
                     escaped = escape_html(line)
                     html_line = ansi_converter.convert(escaped, full=False).strip()
                     yield f"data: {html_line}\n\n"
                 yield "data: CLOSE\n\n"
+
             return Response(error_gen(), mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
@@ -919,17 +936,8 @@ def stream():
     else:
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
-    global_args = [
-        "--main-dir", ".",
-        "--timeout", "60",
-        "--output", "human-color"
-    ]
-    start_args = [
-        "--server", SERVER_IP,
-        "--jvm-args", JVM_OPTS,
-        "fabric:",
-        "-u", user
-    ]
+    global_args = ["--main-dir", ".", "--timeout", "60", "--output", "human-color"]
+    start_args = ["--server", SERVER_IP, "--jvm-args", JVM_OPTS, "fabric:", "-u", user]
 
     # Custom Java path
     java_exe = "java.exe" if os.name == "nt" else "java"
@@ -972,7 +980,7 @@ def stream():
                 if closed_event.is_set():
                     disc_msg = ansi_converter.convert(
                         escape_html("\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"),
-                        full=False
+                        full=False,
                     ).strip()
                     try:
                         yield f"data: {disc_msg}\n\n"
@@ -986,7 +994,7 @@ def stream():
                         break
                     continue
 
-                raw_line = line.rstrip('\n')
+                raw_line = line.rstrip("\n")
                 now = time.perf_counter()
 
                 if not ok_reached and "[ OK ]" in raw_line:
@@ -998,7 +1006,10 @@ def stream():
 
                 if progress_match and not ok_reached:
                     current_file = progress_match.group(1)
-                    if current_file != last_progress and (now - last_send_time) > update_interval:
+                    if (
+                        current_file != last_progress
+                        and (now - last_send_time) > update_interval
+                    ):
                         try:
                             yield f"data: {html_line}\n\n"
                         except (BrokenPipeError, OSError):
@@ -1035,12 +1046,13 @@ def stream():
             # Session messages – errors are ignored, we still want CLOSE
             try:
                 ended_msg = ansi_converter.convert(
-                    escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"),
-                    full=False
+                    escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
                 ).strip()
                 tip_msg = ansi_converter.convert(
-                    escape_html("\x1b[34m[TIP] Click the console to return to login.\x1b[0m"),
-                    full=False
+                    escape_html(
+                        "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
+                    ),
+                    full=False,
                 ).strip()
                 yield f"data: {ended_msg}\n\n"
                 yield f"data: {tip_msg}\n\n"
@@ -1063,9 +1075,11 @@ def stream():
     response.call_on_close(closed_event.set)
     return response
 
+
 @app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
+
 
 def kill_minecraft_java_processes():
     """Find and kill Java processes that look like Minecraft clients (by command line)."""
@@ -1082,11 +1096,11 @@ def kill_minecraft_java_processes():
         }
         """
         result = subprocess.run(
-            ['powershell', '-Command', ps_command],
+            ["powershell", "-Command", ps_command],
             capture_output=True,
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=5
+            timeout=5,
         )
         if result.returncode == 0:
             pids_found = set()
@@ -1097,10 +1111,10 @@ def kill_minecraft_java_processes():
             for pid in pids_found:
                 logging.info(f"Found candidate Minecraft Java process: PID {pid}")
                 kill_result = subprocess.run(
-                    ['taskkill', '/F', '/PID', str(pid)],
+                    ["taskkill", "/F", "/PID", str(pid)],
                     capture_output=True,
                     text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 if kill_result.returncode == 0:
                     logging.info(f"Killed Java PID {pid}")
@@ -1111,6 +1125,7 @@ def kill_minecraft_java_processes():
             logging.error(f"PowerShell query failed: {result.stderr}")
     except Exception as e:
         logging.error(f"Error in kill_minecraft_java_processes: {e}")
+
 
 def kill_process_tree(proc):
     """Kill a process and all its children using taskkill."""
@@ -1127,11 +1142,12 @@ def kill_process_tree(proc):
         logging.error(f"Error terminating process {proc.pid}: {e}")
     # Force kill the entire tree
     subprocess.run(
-        ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
         capture_output=True,
-        creationflags=subprocess.CREATE_NO_WINDOW
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
     logging.info(f"Force‑killed process tree with PID {proc.pid}")
+
 
 def cleanup_processes():
     """Terminate any remaining Minecraft Java processes (launcher cleanup is optional)."""
@@ -1140,10 +1156,12 @@ def cleanup_processes():
     # The launcher process (portablemc) is already dead or will be reaped automatically
     # No need to track or kill it separately
 
+
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
     cleanup_processes()
     sys.exit(0)
+
 
 # Set signal handler for SIGINT (Ctrl+C)
 signal.signal(signal.SIGINT, graceful_shutdown)
