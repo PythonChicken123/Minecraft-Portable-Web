@@ -1,6 +1,7 @@
 from pathlib import Path
 from ansi2html import Ansi2HTMLConverter
 from flask import Flask, request, render_template_string, jsonify, Response
+from flask_socketio import SocketIO, emit
 import subprocess
 import sys
 import socket
@@ -12,25 +13,31 @@ import threading
 import logging
 import os
 import importlib.util
+import atexit
+
 
 app = Flask(__name__)
-
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 def escape_html(s):
     """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 # --- CONFIGURATION ---
-VALID_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,16}$")
-FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]  # Add forbidden usernames
-PASS_KEY = "1234"  # Add forbidden username password
-SERVER_IP = "eu.chickencraft.nl"  # Add server IP for quick join or disable it with ""
+VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
+FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
+PASS_KEY = "1234"
+SERVER_IP = "77.103.184.72"
+# SERVER_IP = "eu.chickencraft.nl"
 JVM_OPTS = "-Xmx3G -Xms3G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M -XX:+AlwaysPreTouch -XX:+ParallelRefProcEnabled -XX:+DisableExplicitGC"
 
 # Thread-safe process tracking
 active_processes = {}
 processes_lock = threading.Lock()
+
+# Track connected clients
+connected_clients = 0
+clients_lock = threading.Lock()
 
 # ANSI to HTML converter (dark background, inline styles)
 ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
@@ -71,7 +78,7 @@ HTML_TEMPLATE = r"""
             left: 0;
             width: 100%;
             height: 100%;
-            backdrop-filter: blur(8px) saturate(180%);
+            backdrop-filter: blur(8		px) saturate(180%);
             -webkit-backdrop-filter: blur(8px) saturate(180%);
             z-index: 0;
             pointer-events: none;
@@ -322,6 +329,20 @@ HTML_TEMPLATE = r"""
             background: rgba(255, 255, 255, 0.25);
         }
 
+        #flask-status {
+            font-size: 8px;
+            margin-top: -10px;
+            margin-bottom: 10px;
+            color: rgba(255, 255, 255, 0.3);
+            letter-spacing: 1px;
+        }
+        #flask-status.online {
+            color: rgba(46, 204, 113, 0.5);
+        }
+        #flask-status.offline {
+            color: rgba(231, 76, 60, 0.5);
+        }
+
         .log-group {
             border-left: 2px solid rgba(255, 255, 255, 0.2);
             margin-bottom: 6px;
@@ -445,7 +466,9 @@ HTML_TEMPLATE = r"""
                 <div id="statusDot" class="status-dot"></div>
                 <div class="subtitle">Minecraft Java 1.21.11</div>
             </div>
-            
+            <div id="flask-status" style="font-size: 8px; margin-top: -10px; margin-bottom: 10px; color: rgba(255,255,255,0.3);">
+                Flask: <span id="flask-status-text">Connected</span>
+            </div>
             {% if error %}<div style="color:#ff5555; font-size:11px; margin-bottom:20px; font-weight:800; text-transform:uppercase;">{{ error }}</div>{% endif %}
             
             <form id="launchForm" onsubmit="event.preventDefault(); startLaunch();">
@@ -473,6 +496,7 @@ HTML_TEMPLATE = r"""
 
     <div class="watermark">PORTABLE_MC // APEX_V6.5</div>
  
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script>
         const forbidden = {{ forbidden_list | tojson }};
         const consoleNode = document.getElementById('console-container');
@@ -480,11 +504,75 @@ HTML_TEMPLATE = r"""
         const launchBtn = document.getElementById('launchBtn');
         const logOutput = document.getElementById('log-output');
 
+        // WebSocket connection
+        const socket = io({
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 10000
+        });
+
         let currentEventSource = null;
         let fadeTimer = null;
         let currentGroup = null;
         let lastLineColor = '#ffffff';
-        let lastCheckedUser = ''; // Track last checked value
+        let lastCheckedUser = '';
+        let minecraftStatusInterval = null;  // Track interval for Minecraft status
+
+        // WebSocket event handlers
+        socket.on('connect', function() {
+            console.log('WebSocket connected');
+            launchBtn.disabled = false;
+            launchBtn.innerText = "INITIALIZE CORE";
+            document.getElementById('flask-status-text').innerText = 'Connected';
+            document.getElementById('flask-status-text').style.color = '#2ecc71';
+            
+            // Check Minecraft server status immediately
+            socket.emit('ping_minecraft');
+            
+            // Set up interval for periodic Minecraft status checks (every 10 seconds)
+            if (minecraftStatusInterval) clearInterval(minecraftStatusInterval);
+            minecraftStatusInterval = setInterval(() => {
+                if (socket.connected) {
+                    socket.emit('ping_minecraft');
+                }
+            }, 10000);
+        });
+
+        socket.on('disconnect', function() {
+            console.log('WebSocket disconnected');
+            launchBtn.disabled = true;
+            launchBtn.innerText = "CORE OFFLINE";
+            document.getElementById('flask-status-text').innerText = 'Disconnected';
+            document.getElementById('flask-status-text').style.color = '#e74c3c';
+            document.getElementById('statusDot').className = 'status-dot offline';
+            
+            // Clear Minecraft status interval when disconnected
+            if (minecraftStatusInterval) {
+                clearInterval(minecraftStatusInterval);
+                minecraftStatusInterval = null;
+            }
+        });
+
+        socket.on('core_status', function(data) {
+            if (!data.online) {
+                launchBtn.disabled = true;
+                launchBtn.innerText = "CORE OFFLINE";
+                document.getElementById('flask-status-text').innerText = 'Disconnected';
+                document.getElementById('flask-status-text').style.color = '#e74c3c';
+                document.getElementById('statusDot').className = 'status-dot offline';
+            }
+        });
+
+        socket.on('minecraft_status', function(data) {
+            const dot = document.getElementById('statusDot');
+            if (data.online) {
+                dot.className = 'status-dot online';
+            } else {
+                dot.className = 'status-dot offline';
+            }
+        });
 
         function appendLog(htmlContent) {
             const line = document.createElement('div');
@@ -554,11 +642,10 @@ HTML_TEMPLATE = r"""
 
             const currentUser = userField.value.trim().toLowerCase();
             
-            // Avoid duplicate processing if value hasn't changed
             if (currentUser === lastCheckedUser) return;
             lastCheckedUser = currentUser;
 
-            console.log(`[checkForbidden] username: "${currentUser}"`); // Debug
+            console.log(`[checkForbidden] username: "${currentUser}"`);
 
             const isMatch = forbidden.some(name => name.toLowerCase() === currentUser);
 
@@ -570,10 +657,8 @@ HTML_TEMPLATE = r"""
                 passContainer.style.display = "block";
                 warnText.style.display = "block";
                 passInput.required = true;
-                // Force multiple reflows to ensure the browser renders immediately
                 void passContainer.offsetHeight;
                 void warnText.offsetHeight;
-                // Also force a reflow on the body as a last resort
                 document.body.style.display = 'none';
                 document.body.style.display = '';
             } else {
@@ -596,7 +681,6 @@ HTML_TEMPLATE = r"""
             const user = document.getElementById('username').value;
             const pass = document.getElementById('password').value;
 
-            // Save username to localStorage
             localStorage.setItem('last_mc_user', user);
 
             launchBtn.disabled = true;
@@ -640,64 +724,27 @@ HTML_TEMPLATE = r"""
             localStorage.setItem('ambient_mode', active ? 'on' : 'off');
         }
 
-        async function checkServer() {
-            const btn = document.getElementById('launchBtn');
-            const dot = document.getElementById('statusDot');
-
-            if (btn.innerText === "INITIALIZING..." || (btn.disabled && btn.innerText !== "CORE OFFLINE")) return;
-
-            try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 800);
-
-                const res = await fetch('/ping', { signal: controller.signal });
-                clearTimeout(timeoutId);
-
-                dot.className = 'status-dot online';
-                btn.disabled = false;
-                if (btn.innerText === "CORE OFFLINE") btn.innerText = "INITIALIZE CORE";
-
-            } catch (err) {
-                dot.className = 'status-dot offline';
-                btn.disabled = true;
-                btn.innerText = "CORE OFFLINE";
-            }
-        }
-
         window.onload = function() {
             const userField = document.getElementById('username');
 
-            // Restore saved username
             const savedUser = localStorage.getItem('last_mc_user');
             if (savedUser) {
                 userField.value = savedUser;
             }
 
-            // Restore ambient mode
             const savedMode = localStorage.getItem('ambient_mode');
             if (savedMode === 'on' || savedMode === null) {
                 document.getElementById('bgToggle').checked = true;
                 document.getElementById('bodyNode').classList.add('show-bg');
             }
 
-            // --- AUTOFILL DETECTION ---
-            // 1. Event listeners for user interactions
+            // Essential: detect autofill – needs polling because browser doesn't fire events
             userField.addEventListener('input', checkForbidden);
             userField.addEventListener('change', checkForbidden);
             userField.addEventListener('paste', () => setTimeout(checkForbidden, 10));
-
-            // 2. Poll every 100ms (faster than 200ms) to catch property changes
-            setInterval(checkForbidden, 100);
-
-            // 3. Also check when window gains focus (covers clicking back into the window)
+            setInterval(checkForbidden, 100);  // Only interval kept for autofill
             window.addEventListener('focus', checkForbidden);
-
-            // Check initial value immediately
             checkForbidden();
-
-            // Server status
-            checkServer();
-            setInterval(checkServer, 3000);
         };
     </script>
 </body>
@@ -706,6 +753,36 @@ HTML_TEMPLATE = r"""
 
 # --- ROUTES ---
 
+@socketio.on('connect')
+def handle_connect():
+    global connected_clients
+    with clients_lock:
+        connected_clients += 1
+        client_id = request.sid
+        print(f'Client connected: {client_id} (Total: {connected_clients})')
+    
+    # Send initial status
+    emit('status', {'core': 'online', 'minecraft': 'checking'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    global connected_clients
+    with clients_lock:
+        connected_clients -= 1
+        client_id = request.sid
+        print(f'Client disconnected: {client_id} (Total: {connected_clients})')
+
+@socketio.on('ping_minecraft')
+def handle_ping_minecraft():
+    """Check Minecraft server status on demand"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.5)
+        s.connect((SERVER_IP, 25565))
+        s.close()
+        emit('minecraft_status', {'online': True})
+    except Exception:
+        emit('minecraft_status', {'online': False})
 
 @app.route("/ping")
 def ping():
@@ -717,46 +794,39 @@ def ping():
         s.close()
         return jsonify(online=True)
     except Exception:
-        return jsonify(online=False)
-
+        # Always return 200 OK with online=false
+        return jsonify(online=False), 200
 
 @app.route("/stream")
 def stream():
-    # --- PORTABLEMC AVAILABILITY CHECK (simplified and reliable) ---
+    # --- PORTABLEMC AVAILABILITY CHECK ---
     def is_portablemc_available():
         if shutil.which("portablemc"):
             return True
-        # Check if the module can be imported without actually importing it
         return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
-
         def error_gen():
             yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
             yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- GET USER INPUT ---
     user = request.args.get("username", "Player").strip()
     password = request.args.get("password", "")
 
-    # --- CHECK FOR EMPTY USERNAME ---
+    # --- VALIDATIONS (same as before) ---
     if not user:
-
         def error_gen():
             msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
-    # --- VALIDATE USERNAME FORMAT ---
     if not VALID_USERNAME_REGEX.match(user):
-
         def error_gen():
             msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
             msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
@@ -767,55 +837,56 @@ def stream():
             yield f"data: {html1}\n\n"
             yield f"data: {html2}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
-    # --- CASE-INSENSITIVE FORBIDDEN NAME CHECK ---
     user_lower = user.lower()
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
-
     if user_lower in forbidden_lower and password != PASS_KEY:
-
         def error_gen():
             msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
-    # --- PREVENT MULTIPLE LAUNCHES (thread‑safe) ---
+    # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
-
             def error_gen():
                 lines = [
                     "\x1b[91m[!] CORE BUSY\x1b[0m",
                     "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                    "\x1b[90mPlease close the game before launching again.\x1b[0m",
+                    "\x1b[90mPlease close the game before launching again.\x1b[0m"
                 ]
                 for line in lines:
                     escaped = escape_html(line)
                     html_line = ansi_converter.convert(escaped, full=False).strip()
                     yield f"data: {html_line}\n\n"
                 yield "data: CLOSE\n\n"
-
             return Response(error_gen(), mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
 
-    # --- BUILD COMMAND (CROSS‑PLATFORM PATHS, USER DIRECTORY) ---
+    # --- BUILD COMMAND ---
     if shutil.which("portablemc"):
         launcher_cmd = ["portablemc"]
     else:
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
-    global_args = ["--main-dir", ".", "--timeout", "60", "--output", "human-color"]
+    global_args = [
+        "--main-dir", ".",
+        "--timeout", "60",
+        "--output", "human-color"
+    ]
+    start_args = [
+        "--server", SERVER_IP,
+        "--jvm-args", JVM_OPTS,
+        "fabric:",
+        "-u", user
+    ]
 
-    start_args = ["--server", SERVER_IP, "--jvm-args", JVM_OPTS, "fabric:", "-u", user]
-
-    # Cross‑platform custom Java path
+    # Custom Java path
     java_exe = "java.exe" if os.name == "nt" else "java"
     java_bin = Path.cwd() / "jvm" / "java-runtime-delta" / "bin" / java_exe
     if java_bin.exists():
@@ -826,8 +897,6 @@ def stream():
 
     # --- DISCONNECT DETECTION ---
     closed_event = threading.Event()
-
-    # Pre-compile regex for progress lines
     progress_re = re.compile(r"(\d+/\d+)")
 
     def generate():
@@ -842,11 +911,12 @@ def stream():
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
 
             with processes_lock:
                 active_processes[user] = process
+                logging.info(f"Started process for {user} with PID {process.pid}")
 
             last_progress = ""
             last_send_time = time.perf_counter()
@@ -857,14 +927,13 @@ def stream():
                 if closed_event.is_set():
                     disc_msg = ansi_converter.convert(
                         escape_html("\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"),
-                        full=False,
+                        full=False
                     ).strip()
                     try:
                         yield f"data: {disc_msg}\n\n"
                     except (BrokenPipeError, OSError):
                         pass
-                    process.terminate()
-                    break
+                    break  # Exit loop; process will be terminated in finally
 
                 line = process.stdout.readline()
                 if not line:
@@ -872,24 +941,19 @@ def stream():
                         break
                     continue
 
-                raw_line = line.rstrip("\n")
+                raw_line = line.rstrip('\n')
                 now = time.perf_counter()
 
                 if not ok_reached and "[ OK ]" in raw_line:
                     ok_reached = True
 
                 progress_match = progress_re.search(raw_line)
-
-                # Escape HTML special characters, then convert ANSI to HTML
                 escaped = escape_html(raw_line)
                 html_line = ansi_converter.convert(escaped, full=False).strip()
 
                 if progress_match and not ok_reached:
                     current_file = progress_match.group(1)
-                    if (
-                        current_file != last_progress
-                        and (now - last_send_time) > update_interval
-                    ):
+                    if current_file != last_progress and (now - last_send_time) > update_interval:
                         try:
                             yield f"data: {html_line}\n\n"
                         except (BrokenPipeError, OSError):
@@ -917,31 +981,27 @@ def stream():
         finally:
             if process:
                 process.stdout.close()
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                # Use the robust process tree killer
+                kill_process_tree(process)
             with processes_lock:
                 if user in active_processes:
                     del active_processes[user]
+                    logging.info(f"Removed process entry for {user}")
 
+            # Send session end messages (converted)
             ended_msg = ansi_converter.convert(
-                escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
+                escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"),
+                full=False
             ).strip()
             tip_msg = ansi_converter.convert(
-                escape_html(
-                    "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
-                ),
-                full=False,
+                escape_html("\x1b[34m[TIP] Click the console to return to login.\x1b[0m"),
+                full=False
             ).strip()
             try:
                 yield f"data: {ended_msg}\n\n"
                 yield f"data: {tip_msg}\n\n"
             except Exception:
                 pass
-
             try:
                 yield "data: CLOSE\n\n"
             except Exception:
@@ -951,28 +1011,95 @@ def stream():
     response.call_on_close(closed_event.set)
     return response
 
-
 @app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
 
+def kill_process_tree(proc):
+    """Kill the portablemc process and any Minecraft Java child processes."""
+    if proc.poll() is not None:
+        logging.info(f"Process {proc.pid} already dead")
+    else:
+        # Kill the launcher process
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+            logging.info(f"Launcher process {proc.pid} terminated")
+        except subprocess.TimeoutExpired:
+            logging.warning(f"Launcher process {proc.pid} didn't terminate, forcing...")
+            subprocess.run(['taskkill', '/F', '/PID', str(proc.pid)],
+                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+    # Give the Java process a moment to settle
+    time.sleep(0.5)
+
+    # Now find and kill any Minecraft Java processes
+    kill_minecraft_java_processes()
+
+def kill_minecraft_java_processes():
+    """Find and kill Java processes that look like Minecraft clients (by command line)."""
+    logging.info("Searching for Minecraft Java processes...")
+    try:
+        # PowerShell command to get PIDs of Java processes whose command line contains our JVM path or keywords
+        ps_command = """
+        Get-Process | Where-Object { $_.ProcessName -match 'java' } | ForEach-Object {
+            $p = $_
+            $cmd = (Get-WmiObject Win32_Process -Filter "ProcessId = $($p.Id)").CommandLine
+            if ($cmd -match 'java-runtime-delta' -or $cmd -match 'fabric' -or $cmd -match 'minecraft') {
+                Write-Output $p.Id
+            }
+        }
+        """
+        result = subprocess.run(
+            ['powershell', '-Command', ps_command],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pid = int(line)
+                    logging.info(f"Found candidate Minecraft Java process: PID {pid}")
+                    kill_result = subprocess.run(
+                        ['taskkill', '/F', '/PID', str(pid)],
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    if kill_result.returncode == 0:
+                        logging.info(f"Killed Java PID {pid}")
+                    else:
+                        logging.error(f"Failed to kill Java PID {pid}: {kill_result.stderr}")
+        else:
+            logging.error(f"PowerShell query failed: {result.stderr}")
+    except Exception as e:
+        logging.error(f"Error in kill_minecraft_java_processes: {e}")
+
+def cleanup_processes():
+    """Terminate all tracked processes and any Minecraft Java processes."""
+    logging.info("Cleaning up Minecraft processes...")
+    with processes_lock:
+        for user, proc in list(active_processes.items()):
+            kill_process_tree(proc)  # This now handles both launcher and Java
+            del active_processes[user]
+    logging.info("Cleanup completed.")
 
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
-    with processes_lock:
-        for user, proc in list(active_processes.items()):
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-    time.sleep(0.5)
+    
+    # No explicit emit – disconnect will be detected by client
+    cleanup_processes()
     sys.exit(0)
 
-
+# Set signal handler for SIGINT (Ctrl+C)
 signal.signal(signal.SIGINT, graceful_shutdown)
 
 if __name__ == "__main__":
-    app.run(port=5000, threaded=True, debug=False)
-
-if __name__ == "__main__":
-    app.run(port=5000, threaded=True, debug=False)
+    try:
+        socketio.run(app, port=5000, debug=False, allow_unsafe_werkzeug=True)
+    except KeyboardInterrupt:
+        # Fallback if signal handler doesn't catch it
+        graceful_shutdown(None, None)
