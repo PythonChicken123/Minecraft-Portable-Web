@@ -13,7 +13,6 @@ import threading
 import logging
 import os
 import importlib.util
-import atexit
 
 
 app = Flask(__name__)
