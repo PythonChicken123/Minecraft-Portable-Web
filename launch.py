@@ -1064,6 +1064,27 @@ def kill_minecraft_java_processes():
     except Exception as e:
         logging.error(f"Error in kill_minecraft_java_processes: {e}")
 
+def kill_process_tree(proc):
+    """Kill a process and all its children using taskkill."""
+    if proc.poll() is not None:
+        logging.debug(f"Process {proc.pid} already dead")
+        return
+    try:
+        # First try graceful termination
+        proc.terminate()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        logging.error(f"Error terminating process {proc.pid}: {e}")
+    # Force kill the entire tree
+    subprocess.run(
+        ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+        capture_output=True,
+        creationflags=subprocess.CREATE_NO_WINDOW
+    )
+    logging.info(f"Force‑killed process tree with PID {proc.pid}")
+
 def cleanup_processes():
     """Terminate any remaining Minecraft Java processes (launcher cleanup is optional)."""
     logging.info("Cleaning up Minecraft Java processes...")
