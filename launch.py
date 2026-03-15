@@ -42,33 +42,54 @@ HTML_TEMPLATE = r"""
     <meta charset="UTF-8">
     <title>Minecraft - Java Edition</title>
     <style>
-        * { box-sizing: border-box; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        * {
+            box-sizing: border-box;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
         
-        html, body { 
-            height: 100%; margin: 0; padding: 0; width: 100%; 
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background-color: #080808;
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: #0a0a0a;
             overflow: hidden;
         }
 
         body.show-bg {
-            background: radial-gradient(circle, rgba(0,0,0,0.2) 0%, rgba(0,0,0,0.6) 100%), 
+            background: radial-gradient(circle at 20% 30%, rgba(20, 40, 80, 0.4) 0%, rgba(0, 0, 0, 0.8) 100%),
                         url('/static/bg.png') no-repeat center center fixed;
             background-size: cover;
         }
 
         .blur-overlay {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-            z-index: 0; pointer-events: none; display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            backdrop-filter: blur(8px) saturate(180%);
+            -webkit-backdrop-filter: blur(8px) saturate(180%);
+            z-index: 0;
+            pointer-events: none;
+            display: none;
+            background: rgba(0, 0, 0, 0.2);
         }
-        body.show-bg .blur-overlay { display: block; }
+        body.show-bg .blur-overlay {
+            display: block;
+        }
 
         .main-container {
-            position: relative; z-index: 10;
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            height: 100vh; width: 100%;
-            margin-top: -5vh; 
+            position: relative;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            width: 100%;
+            margin-top: -5vh;
             animation: appEntry 1s ease-out;
         }
 
@@ -78,13 +99,14 @@ HTML_TEMPLATE = r"""
         }
 
         .top-logo {
-            width: 550px; max-width: 90%;
+            width: 550px;
+            max-width: 90%;
             margin-bottom: 40px;
-            filter: drop-shadow(0 20px 40px rgba(0,0,0,0.9));
+            filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.8));
         }
 
         @keyframes float {
-            0%, 100% { transform: translateY(0px); }
+            0%, 100% { transform: translateY(0); }
             50% { transform: translateY(-10px); }
         }
 
@@ -92,18 +114,19 @@ HTML_TEMPLATE = r"""
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 20px;
-            background: rgba(10, 10, 10, 0.75);
-            backdrop-filter: blur(30px) saturate(180%);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 32px;
-            width: 420px; 
-            padding: 45px 50px; 
+            gap: 24px;
+            background: rgba(15, 15, 20, 0.6);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 40px;
+            width: 440px;
+            padding: 48px 52px;
             text-align: center;
-            color: white;            
+            color: white;
             animation: float 6s ease-in-out infinite;
-            box-shadow: 0 40px 100px rgba(0, 0, 0, 0.8), 
-                        inset 0 0 20px rgba(255, 255, 255, 0.02);
+            box-shadow: 0 40px 80px rgba(0, 0, 0, 0.8),
+                        inset 0 0 30px rgba(255, 255, 255, 0.02);
         }
 
         form {
@@ -113,269 +136,292 @@ HTML_TEMPLATE = r"""
         }
 
         #forbidden-warn {
-            color: #ff5555; 
-            font-size: 9px; 
-            margin: 10px 0 5px 5px; /* Top, Right, Bottom, Left spacing */
-            font-weight: 800; 
+            color: #ff5a5a;
+            font-size: 9px;
+            margin: 12px 0 6px 6px;
+            font-weight: 700;
             text-align: left;
             text-transform: uppercase;
-            animation: pulse-red 1.5s infinite;
+            letter-spacing: 0.5px;
+            animation: pulse-red 1.8s infinite;
+            text-shadow: 0 0 8px rgba(255, 90, 90, 0.3);
         }
 
-        @keyframes pulse-red { 
-            0%, 100% { opacity: 1; transform: scale(1); } 
-            50% { opacity: 0.7; transform: scale(0.98); } 
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
         }
 
         .status-container {
             display: flex;
-            align-items: center; /* Vertical center */
+            align-items: center;
             justify-content: center;
-            gap: 12px;
-            margin-bottom: 30px;
-            line-height: 1; /* Ensures the text height matches the dot */
+            gap: 14px;
+            margin-bottom: 24px;
         }
 
         .status-dot {
-            width: 8px; 
-            height: 8px; 
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
-            flex-shrink: 0; /* Prevents dot from squishing */
+            flex-shrink: 0;
+            transition: box-shadow 0.3s ease;
         }
-        .status-dot.online { background: #00ff88; box-shadow: 0 0 12px #00ff88; }
-        .status-dot.offline { background: #ff4444; box-shadow: 0 0 12px #ff4444; }
+        .status-dot.online {
+            background: #2ecc71;
+            box-shadow: 0 0 15px #2ecc71;
+        }
+        .status-dot.offline {
+            background: #e74c3c;
+            box-shadow: 0 0 15px #e74c3c;
+        }
 
-        .subtitle { font-size: 10px; letter-spacing: 4px; text-transform: uppercase; color: rgba(255,255,255,0.4); font-weight: 900; }
+        .subtitle {
+            font-size: 10px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.4);
+            font-weight: 600;
+        }
 
         .input-wrapper {
-            border: none !important;
-            box-shadow: none !important;
+            position: relative;
+            width: 100%;
+            margin-bottom: 12px;
         }
 
         input {
-            width: 100%; 
+            width: 100%;
             padding: 18px 22px;
-            /* Low alpha (0.05) ensures the blur is visible and not solid */
-            background: rgba(255, 255, 255, 0.05) !important; 
-            border: 1px solid rgba(255, 255, 255, 0.1) !important;
-            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.03) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 24px;
             color: white !important;
-            
-            /* High-visibility typing cursor */
-            caret-color: white !important; 
-            
-            /* Kills the 2-3px offset and browser-specific 'shimmer' */
+            font-size: 15px;
+            caret-color: #4d9eff !important;
             outline: none !important;
-            box-shadow: none !important; 
-            background-clip: padding-box;
-            
-            /* Pro-level glass effect */
-            backdrop-filter: blur(12px) saturate(150%);
-            -webkit-backdrop-filter: blur(12px) saturate(150%);
-            
-            /* Force the OS to stop styling the bar */
+            box-shadow: none !important;
+            backdrop-filter: blur(10px) saturate(150%);
+            -webkit-backdrop-filter: blur(10px) saturate(150%);
             appearance: none;
             -webkit-appearance: none;
-            
             transition: all 0.3s ease;
         }
 
         input:focus {
-            /* Keep it sharp on focus - only change the border color, no shadow */
-            border-color: rgba(37, 99, 235, 0.6) !important;
-            background: rgba(255, 255, 255, 0.06) !important;
+            border-color: rgba(77, 158, 255, 0.5) !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+            box-shadow: 0 0 0 4px rgba(77, 158, 255, 0.1) !important;
         }
 
-        /* Force Autofill to be Translucent Glass */
         input:-webkit-autofill {
             -webkit-text-fill-color: white !important;
-            -webkit-box-shadow: 0 0 0px 1000px rgba(15, 15, 15, 0.85) inset !important;
+            -webkit-box-shadow: 0 0 0px 1000px rgba(20, 20, 30, 0.9) inset !important;
             transition: background-color 5000s ease-in-out 0s;
         }
 
-        input:focus {
-            background: rgba(255, 255, 255, 0.1) !important;
-            border-color: #2563eb !important;
-            box-shadow: 0 0 20px rgba(37, 99, 235, 0.2);
-        }
-
         .toggle-pass {
-            position: absolute; 
-            right: 18px; 
+            position: absolute;
+            right: 20px;
             top: 50%;
-            transform: translateY(-50%); /* Perfectly centers it vertically */
-            cursor: pointer; 
-            display: flex; 
+            transform: translateY(-50%);
+            cursor: pointer;
+            display: flex;
             align-items: center;
             z-index: 10;
+            padding: 8px;
         }
 
-        .toggle-pass svg { 
-            width: 18px; 
-            height: 18px; 
-            fill: #2563eb !important; /* Force blue by default */
-            opacity: 0.6;
-            transition: opacity 0.3s ease, fill 0.3s ease;
+        .toggle-pass svg {
+            width: 20px;
+            height: 20px;
+            fill: rgba(255, 255, 255, 0.5) !important;
+            transition: all 0.2s ease;
         }
-        
-        .toggle-pass:hover svg { 
-            opacity: 1; 
-            fill: #fff !important; /* Turn white on hover */
-            filter: drop-shadow(0 0 8px #2563eb);
+
+        .toggle-pass:hover svg {
+            fill: white !important;
+            filter: drop-shadow(0 0 8px #4d9eff);
         }
 
         button {
-            width: 100%; background: #2563eb; color: white; border: none;
-            padding: 20px; border-radius: 16px;
-            font-weight: 800; font-size: 14px; cursor: pointer;
-            letter-spacing: 1px; margin-top: 10px;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1), background 0.5s ease;
+            width: 100%;
+            background: rgba(77, 158, 255, 0.2);
+            color: white;
+            border: 1px solid rgba(77, 158, 255, 0.3);
+            padding: 18px 24px;
+            border-radius: 28px;
+            font-weight: 600;
+            font-size: 14px;
+            letter-spacing: 1.5px;
+            cursor: pointer;
+            margin-top: 20px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            transition: all 0.3s ease;
+            text-transform: uppercase;
         }
 
-        button:hover:not(:disabled) { background: #1d4ed8; transform: translateY(-3px); box-shadow: 0 15px 35px rgba(37, 99, 235, 0.4); }
+        button:hover:not(:disabled) {
+            background: rgba(77, 158, 255, 0.3);
+            border-color: rgba(77, 158, 255, 0.6);
+            transform: translateY(-2px);
+            box-shadow: 0 20px 30px rgba(77, 158, 255, 0.2);
+        }
 
         button:disabled {
-            /* Muted but visible dark red */
-            background: rgba(180, 0, 0, 0.15) !important;
-            color: rgba(255, 100, 100, 0.6) !important; /* Lighter red text for visibility */
-            
-            /* Sharp, thin red border to define the shape */
-            border: 1px solid rgba(255, 0, 0, 0.2) !important;
-            
-            /* Text shadow makes the "Core Offline" readable on black */
-            text-shadow: 0 0 10px rgba(255, 0, 0, 0.4);
-            
-            /* Desaturate the button so it looks "unpowered" */
-            filter: saturate(0.5); 
-            
-            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5) !important;
+            background: rgba(180, 70, 70, 0.15) !important;
+            border: 1px solid rgba(255, 100, 100, 0.2) !important;
+            color: rgba(255, 160, 160, 0.6) !important;
+            text-shadow: 0 0 10px rgba(255, 0, 0, 0.2);
             cursor: not-allowed;
-            transform: scale(0.98) !important;
-            transition: all 0.4s ease;
+            transform: none;
+            box-shadow: none;
         }
 
-        /* --- HIGH-PERFORMANCE LIVE CONSOLE --- */
-        #console-container { 
-            display: none; 
-            width: 85%; 
-            height: 65%; 
-            background: rgba(0,0,0,0.9); 
-            backdrop-filter: blur(25px); 
-            border: 1px solid rgba(255,255,255,0.1); 
-            border-radius: 32px; 
-            padding: 35px; 
-            overflow-y: auto; 
+        /* --- LIVE CONSOLE --- */
+        #console-container {
+            display: none;
+            width: 85%;
+            max-width: 1200px;
+            height: 65%;
+            background: rgba(8, 8, 12, 0.85);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 32px;
+            padding: 28px 32px;
+            overflow-y: auto;
             text-align: left;
-            font-family: 'Consolas', monospace; 
-            color: #ffffff; /* Default white text */
-            box-shadow: 0 50px 100px rgba(0,0,0,0.8);
-            
-            /* Interaction & Scrollbar Base */
-            cursor: default;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            color: #ffffff;
+            box-shadow: 0 50px 100px rgba(0, 0, 0, 0.9);
             scrollbar-width: thin;
-            scrollbar-color: rgba(255, 255, 255, 0) transparent;
-            
-            /* Unified Transition */
-            transition: 
-                scrollbar-color 0.8s ease-in-out, 
-                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
-                box-shadow 0.3s ease,
-                border-color 0.3s ease;
+            scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+            transition: all 0.3s ease;
         }
 
         #console-container:hover {
-            transform: scale(1.01);
-            border-color: rgba(255, 255, 255, 0.2);
-            box-shadow: 0 70px 120px rgba(0, 0, 0, 1), 0 0 30px rgba(0, 255, 136, 0.05);
-        }
-
-        /* --- SCROLLBAR STATES --- */
-        #console-container.active-scroll {
-            scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+            border-color: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 70px 140px rgba(0, 0, 0, 1);
         }
 
         #console-container::-webkit-scrollbar {
-            width: 5px;
+            width: 6px;
         }
 
         #console-container::-webkit-scrollbar-thumb {
-            background-color: rgba(255, 255, 255, 0);
-            border-radius: 10px;
-            transition: background-color 0.8s ease; 
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            transition: background 0.3s;
         }
 
-        #console-container.active-scroll::-webkit-scrollbar-thumb {
-            background-color: rgba(255, 255, 255, 0.25);
+        #console-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.25);
         }
 
         .log-group {
             border-left: 2px solid rgba(255, 255, 255, 0.2);
-            margin-bottom: 4px;
-            background: none; 
+            margin-bottom: 6px;
+            padding-left: 2px;
+            background: none;
         }
 
-        .log-line { 
-            font-size: 13px; 
-            padding-left: 15px; 
-            transition: none;
-            line-height: 1.4;
+        .log-line {
+            font-size: 13px;
+            padding: 2px 0 2px 16px;
+            line-height: 1.5;
             background: none;
             margin: 0;
+            font-family: inherit;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
 
-        /* Continuation lines: subtle indent */
         .log-line.continuation-line {
-            padding-left: 17px;
-            opacity: 0.95;
+            padding-left: 18px;
+            opacity: 0.9;
         }
 
         /* --- AMBIENT MODE WIDGET --- */
         .controls {
-            position: fixed; 
-            bottom: 40px; 
-            left: 40px; /* Pushed away from corners to prevent overlap */
-            display: flex; 
-            align-items: center; 
-            gap: 15px; 
+            position: fixed;
+            bottom: 32px;
+            left: 32px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
             z-index: 100;
-            background: rgba(10, 10, 10, 0.6); 
-            backdrop-filter: blur(15px); 
-            padding: 12px 20px; 
-            border-radius: 24px;
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            background: rgba(10, 10, 15, 0.4);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            padding: 10px 18px;
+            border-radius: 36px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
         }
 
-        .switch { position: relative; width: 34px; height: 18px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
+        .switch {
+            position: relative;
+            width: 40px;
+            height: 20px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
         .slider {
-            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(255,255,255,0.1); transition: .4s; border-radius: 34px;
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.1);
+            transition: 0.3s;
+            border-radius: 34px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
         .slider:before {
-            position: absolute; content: ""; height: 12px; width: 12px;
-            left: 3px; bottom: 3px; background-color: #fff; transition: .4s; border-radius: 50%;
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 2px;
+            bottom: 1px;
+            background-color: rgba(255, 255, 255, 0.7);
+            transition: 0.3s;
+            border-radius: 50%;
         }
-        input:checked + .slider { background-color: #2563eb; box-shadow: 0 0 10px rgba(37, 99, 235, 0.4); }
-        input:checked + .slider:before { transform: translateX(16px); }
-
-        .control-label { 
-            font-size: 9px; 
-            color: rgba(255, 255, 255, 0.5); 
-            text-transform: uppercase; 
-            letter-spacing: 2.5px; 
-            font-weight: 800; 
+        input:checked + .slider {
+            background-color: rgba(77, 158, 255, 0.3);
+            border-color: rgba(77, 158, 255, 0.4);
+        }
+        input:checked + .slider:before {
+            transform: translateX(20px);
+            background-color: #4d9eff;
+            box-shadow: 0 0 10px #4d9eff;
         }
 
-        .watermark { 
-            position: fixed; 
-            bottom: 40px; 
-            right: 40px; 
-            font-size: 9px; 
-            color: rgba(255,255,255,0.2); 
-            font-weight: 900; 
-            letter-spacing: 4px; 
+        .control-label {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-weight: 500;
+        }
+
+        .watermark {
+            position: fixed;
+            bottom: 32px;
+            right: 32px;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.2);
+            font-weight: 400;
+            letter-spacing: 3px;
             pointer-events: none;
+            z-index: 100;
         }
     </style>
 </head>
@@ -424,7 +470,7 @@ HTML_TEMPLATE = r"""
     </div>
 
     <div class="watermark">PORTABLE_MC // APEX_V6.5</div>
-
+ 
     <script>
         const forbidden = {{ forbidden_list | tojson }};
         const consoleNode = document.getElementById('console-container');
@@ -436,23 +482,21 @@ HTML_TEMPLATE = r"""
         let fadeTimer = null;
         let currentGroup = null;
         let lastLineColor = '#ffffff';
+        let lastCheckedUser = ''; // Track last checked value
 
         function appendLog(htmlContent) {
             const line = document.createElement('div');
             line.className = 'log-line';
             line.innerHTML = htmlContent;
 
-            // Get plain text content for detection
             const rawText = (line.textContent || line.innerText || '').trim();
             const isNewLogLine = /^\[\d\d:\d\d:\d\d\]/.test(rawText);
 
             if (isNewLogLine) {
-                // This is a new log entry – create a new group container
                 currentGroup = document.createElement('div');
                 currentGroup.className = 'log-group';
                 logOutput.appendChild(currentGroup);
 
-                // Update the stored color from this line's content
                 const coloredSpans = line.querySelectorAll('span[style*="color"]');
                 if (coloredSpans.length > 0) {
                     const lastSpan = coloredSpans[coloredSpans.length - 1];
@@ -461,12 +505,10 @@ HTML_TEMPLATE = r"""
                     lastLineColor = '#ffffff';
                 }
             } else if (rawText.length > 0) {
-                // This is a continuation line – add the class and apply previous line's color
                 line.classList.add('continuation-line');
                 line.style.color = lastLineColor;
             }
 
-            // Append the line to the current group (or create a fallback group if none exists)
             if (!currentGroup) {
                 currentGroup = document.createElement('div');
                 currentGroup.className = 'log-group';
@@ -474,7 +516,6 @@ HTML_TEMPLATE = r"""
             }
             currentGroup.appendChild(line);
 
-            // Scroll to bottom
             consoleNode.scrollTop = consoleNode.scrollHeight;
             triggerScrollFade();
         }
@@ -496,16 +537,29 @@ HTML_TEMPLATE = r"""
         consoleNode.addEventListener('scroll', triggerScrollFade);
         consoleNode.addEventListener('mousemove', triggerScrollFade);
 
-        function showPass() { document.getElementById('password').type = "text"; document.getElementById('eyeIcon').style.fill = "#fff"; }
-        function hidePass() { document.getElementById('password').type = "password"; document.getElementById('eyeIcon').style.fill = "#2563eb"; }
+        function showPass() { 
+            document.getElementById('password').type = "text"; 
+            document.getElementById('eyeIcon').style.fill = "#2563eb"; 
+        }
+        function hidePass() { 
+            document.getElementById('password').type = "password"; 
+            document.getElementById('eyeIcon').style.fill = "rgba(255, 255, 255, 0.6)"; 
+        }
 
         function checkForbidden() {
             const userField = document.getElementById('username');
             if (!userField) return;
 
-            const user = userField.value.trim().toLowerCase();
-            const isMatch = forbidden.some(name => name.toLowerCase() === user);
+            const currentUser = userField.value.trim().toLowerCase();
             
+            // Avoid duplicate processing if value hasn't changed
+            if (currentUser === lastCheckedUser) return;
+            lastCheckedUser = currentUser;
+
+            console.log(`[checkForbidden] username: "${currentUser}"`); // Debug
+
+            const isMatch = forbidden.some(name => name.toLowerCase() === currentUser);
+
             const passContainer = document.getElementById('pass-container');
             const warnText = document.getElementById('forbidden-warn');
             const passInput = document.getElementById('password');
@@ -514,15 +568,24 @@ HTML_TEMPLATE = r"""
                 passContainer.style.display = "block";
                 warnText.style.display = "block";
                 passInput.required = true;
+                // Force multiple reflows to ensure the browser renders immediately
+                void passContainer.offsetHeight;
+                void warnText.offsetHeight;
+                // Also force a reflow on the body as a last resort
+                document.body.style.display = 'none';
+                document.body.style.display = '';
             } else {
                 passContainer.style.display = "none";
                 warnText.style.display = "none";
                 passInput.required = false;
+                void passContainer.offsetHeight;
+                void warnText.offsetHeight;
+                document.body.style.display = 'none';
+                document.body.style.display = '';
             }
         }
 
         async function startLaunch() {
-            // Close any previous EventSource to avoid conflicts
             if (currentEventSource) {
                 currentEventSource.close();
                 currentEventSource = null;
@@ -530,10 +593,13 @@ HTML_TEMPLATE = r"""
 
             const user = document.getElementById('username').value;
             const pass = document.getElementById('password').value;
-            
+
+            // Save username to localStorage
+            localStorage.setItem('last_mc_user', user);
+
             launchBtn.disabled = true;
             launchBtn.innerText = "INITIALIZING...";
-            
+
             loginCard.style.display = "none";
             consoleNode.style.display = "block";
             logOutput.innerHTML = "";
@@ -551,7 +617,7 @@ HTML_TEMPLATE = r"""
                         consoleNode.style.cursor = "pointer";
                         launchBtn.disabled = false;
                         launchBtn.innerText = "INITIALIZE CORE";
-                    }, 500); 
+                    }, 500);
                     return;
                 }
                 appendLog(e.data);
@@ -571,7 +637,7 @@ HTML_TEMPLATE = r"""
             document.getElementById('bodyNode').classList.toggle('show-bg', active);
             localStorage.setItem('ambient_mode', active ? 'on' : 'off');
         }
-        
+
         async function checkServer() {
             const btn = document.getElementById('launchBtn');
             const dot = document.getElementById('statusDot');
@@ -581,14 +647,14 @@ HTML_TEMPLATE = r"""
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 800);
-                
+
                 const res = await fetch('/ping', { signal: controller.signal });
                 clearTimeout(timeoutId);
 
                 dot.className = 'status-dot online';
                 btn.disabled = false;
                 if (btn.innerText === "CORE OFFLINE") btn.innerText = "INITIALIZE CORE";
-                
+
             } catch (err) {
                 dot.className = 'status-dot offline';
                 btn.disabled = true;
@@ -599,23 +665,37 @@ HTML_TEMPLATE = r"""
         window.onload = function() {
             const userField = document.getElementById('username');
 
+            // Restore saved username
             const savedUser = localStorage.getItem('last_mc_user');
-            if (savedUser) { 
-                userField.value = savedUser; 
+            if (savedUser) {
+                userField.value = savedUser;
             }
 
+            // Restore ambient mode
             const savedMode = localStorage.getItem('ambient_mode');
-            if (savedMode === 'on' || savedMode === null) { 
-                document.getElementById('bgToggle').checked = true; 
-                document.getElementById('bodyNode').classList.add('show-bg'); 
+            if (savedMode === 'on' || savedMode === null) {
+                document.getElementById('bgToggle').checked = true;
+                document.getElementById('bodyNode').classList.add('show-bg');
             }
 
+            // --- AUTOFILL DETECTION ---
+            // 1. Event listeners for user interactions
             userField.addEventListener('input', checkForbidden);
             userField.addEventListener('change', checkForbidden);
             userField.addEventListener('paste', () => setTimeout(checkForbidden, 10));
 
-            checkServer(); 
-            setInterval(checkServer, 3000); 
+            // 2. Poll every 100ms (faster than 200ms) to catch property changes
+            setInterval(checkForbidden, 100);
+
+            // 3. Also check when window gains focus (covers clicking back into the window)
+            window.addEventListener('focus', checkForbidden);
+
+            // Check initial value immediately
+            checkForbidden();
+
+            // Server status
+            checkServer();
+            setInterval(checkServer, 3000);
         };
     </script>
 </body>
