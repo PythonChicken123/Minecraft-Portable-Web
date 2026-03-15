@@ -714,7 +714,7 @@ def ping():
         s.connect((SERVER_IP, 25565))
         s.close()
         return jsonify(online=True)
-    except:
+    except Exception:
         return jsonify(online=False)
 
 @app.route("/stream")
@@ -953,13 +953,16 @@ def graceful_shutdown(sig, frame):
         for user, proc in list(active_processes.items()):
             try:
                 proc.terminate()
-            except:
+            except Exception:
                 pass
     time.sleep(0.5)
     sys.exit(0)
 
 
 signal.signal(signal.SIGINT, graceful_shutdown)
+
+if __name__ == "__main__":
+    app.run(port=5000, threaded=True, debug=False)
 
 if __name__ == "__main__":
     app.run(port=5000, threaded=True, debug=False)
