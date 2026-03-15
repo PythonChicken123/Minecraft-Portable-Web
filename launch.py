@@ -15,15 +15,17 @@ import importlib.util
 
 app = Flask(__name__)
 
+
 def escape_html(s):
     """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
-    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 # --- CONFIGURATION ---
-VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
-FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"] # Add forbidden usernames
-PASS_KEY = "1234" # Add forbidden username password
-SERVER_IP = "eu.chickencraft.nl" # Add server IP for quick join or disable it with ""
+VALID_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,16}$")
+FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]  # Add forbidden usernames
+PASS_KEY = "1234"  # Add forbidden username password
+SERVER_IP = "eu.chickencraft.nl"  # Add server IP for quick join or disable it with ""
 JVM_OPTS = "-Xmx3G -Xms3G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M -XX:+AlwaysPreTouch -XX:+ParallelRefProcEnabled -XX:+DisableExplicitGC"
 
 # Thread-safe process tracking
@@ -704,6 +706,7 @@ HTML_TEMPLATE = r"""
 
 # --- ROUTES ---
 
+
 @app.route("/ping")
 def ping():
     """Checks if the Minecraft server is online."""
@@ -716,6 +719,7 @@ def ping():
     except Exception:
         return jsonify(online=False)
 
+
 @app.route("/stream")
 def stream():
     # --- PORTABLEMC AVAILABILITY CHECK (simplified and reliable) ---
@@ -726,10 +730,12 @@ def stream():
         return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
+
         def error_gen():
             yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
             yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- GET USER INPUT ---
@@ -738,16 +744,19 @@ def stream():
 
     # --- CHECK FOR EMPTY USERNAME ---
     if not user:
+
         def error_gen():
             msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- VALIDATE USERNAME FORMAT ---
     if not VALID_USERNAME_REGEX.match(user):
+
         def error_gen():
             msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
             msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
@@ -758,6 +767,7 @@ def stream():
             yield f"data: {html1}\n\n"
             yield f"data: {html2}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- CASE-INSENSITIVE FORBIDDEN NAME CHECK ---
@@ -765,28 +775,32 @@ def stream():
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
 
     if user_lower in forbidden_lower and password != PASS_KEY:
+
         def error_gen():
             msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
             escaped = escape_html(msg)
             html_msg = ansi_converter.convert(escaped, full=False).strip()
             yield f"data: {html_msg}\n\n"
             yield "data: CLOSE\n\n"
+
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- PREVENT MULTIPLE LAUNCHES (thread‑safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
+
             def error_gen():
                 lines = [
                     "\x1b[91m[!] CORE BUSY\x1b[0m",
                     "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                    "\x1b[90mPlease close the game before launching again.\x1b[0m"
+                    "\x1b[90mPlease close the game before launching again.\x1b[0m",
                 ]
                 for line in lines:
                     escaped = escape_html(line)
                     html_line = ansi_converter.convert(escaped, full=False).strip()
                     yield f"data: {html_line}\n\n"
                 yield "data: CLOSE\n\n"
+
             return Response(error_gen(), mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
@@ -797,18 +811,9 @@ def stream():
     else:
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
-    global_args = [
-        "--main-dir", ".",
-        "--timeout", "60",
-        "--output", "human-color"
-    ]
+    global_args = ["--main-dir", ".", "--timeout", "60", "--output", "human-color"]
 
-    start_args = [
-        "--server", SERVER_IP,
-        "--jvm-args", JVM_OPTS,
-        "fabric:",
-        "-u", user
-    ]
+    start_args = ["--server", SERVER_IP, "--jvm-args", JVM_OPTS, "fabric:", "-u", user]
 
     # Cross‑platform custom Java path
     java_exe = "java.exe" if os.name == "nt" else "java"
@@ -837,7 +842,7 @@ def stream():
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
 
             with processes_lock:
@@ -852,7 +857,7 @@ def stream():
                 if closed_event.is_set():
                     disc_msg = ansi_converter.convert(
                         escape_html("\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"),
-                        full=False
+                        full=False,
                     ).strip()
                     try:
                         yield f"data: {disc_msg}\n\n"
@@ -867,7 +872,7 @@ def stream():
                         break
                     continue
 
-                raw_line = line.rstrip('\n')
+                raw_line = line.rstrip("\n")
                 now = time.perf_counter()
 
                 if not ok_reached and "[ OK ]" in raw_line:
@@ -881,7 +886,10 @@ def stream():
 
                 if progress_match and not ok_reached:
                     current_file = progress_match.group(1)
-                    if current_file != last_progress and (now - last_send_time) > update_interval:
+                    if (
+                        current_file != last_progress
+                        and (now - last_send_time) > update_interval
+                    ):
                         try:
                             yield f"data: {html_line}\n\n"
                         except (BrokenPipeError, OSError):
@@ -920,12 +928,13 @@ def stream():
                     del active_processes[user]
 
             ended_msg = ansi_converter.convert(
-                escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"),
-                full=False
+                escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
             ).strip()
             tip_msg = ansi_converter.convert(
-                escape_html("\x1b[34m[TIP] Click the console to return to login.\x1b[0m"),
-                full=False
+                escape_html(
+                    "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
+                ),
+                full=False,
             ).strip()
             try:
                 yield f"data: {ended_msg}\n\n"
@@ -942,9 +951,11 @@ def stream():
     response.call_on_close(closed_event.set)
     return response
 
+
 @app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
+
 
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
