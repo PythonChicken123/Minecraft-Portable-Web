@@ -10,20 +10,21 @@ import signal
 import shutil
 import threading
 import logging
+import traceback
+import psutil
 import os
+import json
 import importlib.util
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-
 def escape_html(s):
     """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 # --- CONFIGURATION ---
-VALID_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,16}$")
+VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
 FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
 PASS_KEY = "1234"
 SERVER_IP = "77.103.184.72"
@@ -38,6 +39,17 @@ processes_lock = threading.Lock()
 connected_clients = 0
 clients_lock = threading.Lock()
 logging.basicConfig(level=logging.INFO)
+
+# Fallbacks when certain libraries are restricted/corrupted/disabled
+try:
+    from ansi2html import Ansi2HTMLConverter
+    ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
+    use_server_conversion = True
+except ImportError:
+    # ansi2html not installed – fallback to raw ANSI
+    use_server_conversion = False
+    logging.warning("ansi2html not installed; client will handle ANSI conversion.")
+
 
 # --- HTML TEMPLATE (with 4-space indented JavaScript) ---
 HTML_TEMPLATE = r"""
@@ -604,57 +616,70 @@ HTML_TEMPLATE = r"""
             });
 
             // --- Core UI functions (unchanged) ---
-            function appendLog(rawAnsiText) {
-                // 1. Create the line element with ANSI → HTML conversion
+            function appendLog(rawData) {
+                // Parse the JSON payload from the server
+                let data;
+                try {
+                    data = JSON.parse(rawData);
+                } catch (e) {
+                    // If parsing fails, assume it's plain text (old format) – fallback
+                    data = { type: 'text', content: rawData };
+                }
+
                 const line = document.createElement('div');
                 line.className = 'log-line';
 
-                let htmlContent = rawAnsiText;
-                if (ansiConverter) {
-                    htmlContent = ansiConverter.ansi_to_html(rawAnsiText);
+                // Generate HTML content based on type
+                let htmlContent;
+                if (data.type === 'html') {
+                    // Already converted on server
+                    htmlContent = data.content;
+                } else if (data.type === 'ansi') {
+                    // Convert on client using ansi_up (if available)
+                    if (ansiConverter) {
+                        htmlContent = ansiConverter.ansi_to_html(data.content);
+                    } else {
+                        htmlContent = data.content; // raw fallback
+                    }
+                } else {
+                    // Plain text fallback
+                    htmlContent = data.content;
                 }
                 line.innerHTML = htmlContent;
 
-                // 2. Extract plain text to determine if this is a new log line
+                // Determine if this is a new log line (starts with a timestamp)
                 const plainText = (line.textContent || line.innerText || '').trim();
                 const isNewLogLine = timestampRegex.test(plainText);
 
                 if (isNewLogLine) {
-                    // ---- Start a new visual group ----
-                    // Create a fresh group container that will hold this line and its continuations
+                    // Start a new visual group
                     currentGroup = document.createElement('div');
                     currentGroup.className = 'log-group';
                     logOutput.appendChild(currentGroup);
 
-                    // Update the stored color based on the last colored span in this line
-                    // This color will be inherited by subsequent continuation lines
+                    // Update the stored color from the last colored span in this line
                     const coloredSpans = line.querySelectorAll('span[style*="color"]');
                     if (coloredSpans.length > 0) {
-                        // Use the color of the last span (typically the message text)
                         const lastSpan = coloredSpans[coloredSpans.length - 1];
                         lastLineColor = lastSpan.style.color;
                     } else {
-                        // Fallback to default white if no color found
                         lastLineColor = '#ffffff';
                     }
                 } else if (plainText.length > 0) {
-                    // ---- Continuation line (stack trace, extra details) ----
-                    // Mark it visually and inherit the color from the preceding log line
+                    // Continuation line (stack trace, extra details)
                     line.classList.add('continuation-line');
                     line.style.color = lastLineColor;
                 }
 
-                // 3. Ensure a group exists (for the very first line or if the first line is a continuation)
+                // Ensure a group exists (for the first line or if the first line is a continuation)
                 if (!currentGroup) {
                     currentGroup = document.createElement('div');
                     currentGroup.className = 'log-group';
                     logOutput.appendChild(currentGroup);
                 }
 
-                // 4. Append the line to the current group
                 currentGroup.appendChild(line);
 
-                // 5. Scroll to the bottom and trigger the fade effect
                 consoleNode.scrollTop = consoleNode.scrollHeight;
                 triggerScrollFade();
             }
@@ -856,29 +881,26 @@ HTML_TEMPLATE = r"""
 
 # --- ROUTES ---
 
-
-@socketio.on("connect")
+@socketio.on('connect')
 def handle_connect():
     global connected_clients
     with clients_lock:
         connected_clients += 1
         client_id = request.sid
-        print(f"Client connected: {client_id} (Total: {connected_clients})")
-
+        print(f'Client connected: {client_id} (Total: {connected_clients})')
+    
     # Send initial status
-    emit("status", {"core": "online", "minecraft": "checking"})
+    emit('status', {'core': 'online', 'minecraft': 'checking'})
 
-
-@socketio.on("disconnect")
+@socketio.on('disconnect')
 def handle_disconnect():
     global connected_clients
     with clients_lock:
         connected_clients -= 1
         client_id = request.sid
-        print(f"Client disconnected: {client_id} (Total: {connected_clients})")
+        print(f'Client disconnected: {client_id} (Total: {connected_clients})')
 
-
-@socketio.on("ping_minecraft")
+@socketio.on('ping_minecraft')
 def handle_ping_minecraft():
     """Check Minecraft server status on demand"""
     try:
@@ -886,10 +908,9 @@ def handle_ping_minecraft():
         s.settimeout(1.5)
         s.connect((SERVER_IP, 25565))
         s.close()
-        emit("minecraft_status", {"online": True})
+        emit('minecraft_status', {'online': True})
     except Exception:
-        emit("minecraft_status", {"online": False})
-
+        emit('minecraft_status', {'online': False})
 
 @app.route("/ping")
 def ping():
@@ -904,7 +925,6 @@ def ping():
         # Always return 200 OK with online=false
         return jsonify(online=False), 200
 
-
 @app.route("/stream")
 def stream():
     # --- PORTABLEMC AVAILABILITY CHECK ---
@@ -914,66 +934,48 @@ def stream():
         return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
-
         def error_gen():
             yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
             yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- GET USER INPUT ---
     user = request.args.get("username", "Player").strip()
     password = request.args.get("password", "")
 
-    # --- VALIDATIONS (plain text, escaped) ---
+    # --- VALIDATIONS ---
     if not user:
-
         def error_gen():
             msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
-            # msg is ANSI, send raw
             yield f"data: {msg}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     if not VALID_USERNAME_REGEX.match(user):
-
         def error_gen():
             msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
             msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
             yield f"data: {msg1}\n\n"
             yield f"data: {msg2}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     user_lower = user.lower()
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
     if user_lower in forbidden_lower and password != PASS_KEY:
-
         def error_gen():
             msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
             yield f"data: {msg}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
-
-            def error_gen():
-                lines = [
-                    "\x1b[91m[!] CORE BUSY\x1b[0m",
-                    "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                    "\x1b[90mPlease close the game before launching again.\x1b[0m",
-                ]
-                for line in lines:
-                    yield f"data: {line}\n\n"
-                yield "data: CLOSE\n\n"
-
-            return Response(error_gen(), mimetype="text/event-stream")
+            busy_payload = json.dumps({'type': 'ansi', 'content': '\x1b[91m[!] CORE BUSY\x1b[0m'})
+            close_payload = "data: CLOSE\n\n"
+            return Response(f"data: {busy_payload}\n\n{close_payload}", mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
 
@@ -983,8 +985,17 @@ def stream():
     else:
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
-    global_args = ["--main-dir", ".", "--timeout", "60", "--output", "human-color"]
-    start_args = ["--server", SERVER_IP, "--jvm-args", JVM_OPTS, "fabric:", "-u", user]
+    global_args = [
+        "--main-dir", ".",
+        "--timeout", "60",
+        "--output", "human-color"
+    ]
+    start_args = [
+        "--server", SERVER_IP,
+        "--jvm-args", JVM_OPTS,
+        "fabric:",
+        "-u", user
+    ]
 
     # Custom Java path
     java_exe = "java.exe" if os.name == "nt" else "java"
@@ -1001,20 +1012,29 @@ def stream():
 
     def generate():
         process = None
+        got_generator_exit = False
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                shell=False,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-
+            # --- ATOMIC PROCESS CREATION AND TRACKING ---
             with processes_lock:
+                # Double-check that no process for this user is still running
+                if user in active_processes and active_processes[user].poll() is None:
+                    busy_payload = json.dumps({'type': 'ansi', 'content': '\x1b[91m[!] CORE BUSY\x1b[0m'})
+                    yield f"data: {busy_payload}\n\n"
+                    yield "data: CLOSE\n\n"
+                    return
+
+                # Start the process and register it immediately
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    shell=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
                 active_processes[user] = process
                 logging.info(f"Started process for {user} with PID {process.pid}")
 
@@ -1024,11 +1044,12 @@ def stream():
             ok_reached = False
 
             while True:
+                # Check for client disconnect
                 if closed_event.is_set():
-                    disc_msg = "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"
+                    disc_msg = json.dumps({'type': 'ansi', 'content': "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"})
                     try:
                         yield f"data: {disc_msg}\n\n"
-                    except (BrokenPipeError, OSError):
+                    except (BrokenPipeError, OSError, GeneratorExit):
                         pass
                     break
 
@@ -1038,7 +1059,7 @@ def stream():
                         break
                     continue
 
-                raw_line = line.rstrip("\n")
+                raw_line = line.rstrip('\n')
                 now = time.perf_counter()
 
                 if not ok_reached and "[ OK ]" in raw_line:
@@ -1046,34 +1067,43 @@ def stream():
 
                 progress_match = progress_re.search(raw_line)
 
-                if progress_match and not ok_reached:
-                    current_file = progress_match.group(1)
-                    if (
-                        current_file != last_progress
-                        and (now - last_send_time) > update_interval
-                    ):
-                        try:
-                            yield f"data: {raw_line}\n\n"
-                        except (BrokenPipeError, OSError):
-                            break
-                        last_progress = current_file
-                        last_send_time = now
-                else:
+                # Decide which format to send
+                if use_server_conversion and ansi_converter:
                     try:
-                        yield f"data: {raw_line}\n\n"
-                    except (BrokenPipeError, OSError):
-                        break
+                        html_line = ansi_converter.convert(raw_line, full=False).strip()
+                        payload = json.dumps({'type': 'html', 'content': html_line})
+                    except Exception as e:
+                        logging.error(f"Conversion failed: {e}, sending raw ANSI")
+                        payload = json.dumps({'type': 'ansi', 'content': raw_line})
+                else:
+                    payload = json.dumps({'type': 'ansi', 'content': raw_line})
+
+                try:
+                    if progress_match and not ok_reached:
+                        current_file = progress_match.group(1)
+                        if current_file != last_progress and (now - last_send_time) > update_interval:
+                            yield f"data: {payload}\n\n"
+                            last_progress = current_file
+                            last_send_time = now
+                    else:
+                        yield f"data: {payload}\n\n"
+                except (BrokenPipeError, OSError, GeneratorExit) as e:
+                    if isinstance(e, GeneratorExit):
+                        got_generator_exit = True
+                    break
 
         except FileNotFoundError as e:
             if not closed_event.is_set():
                 try:
-                    yield f"data: \x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m\n\n"
+                    payload = json.dumps({'type': 'ansi', 'content': f"\x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m"})
+                    yield f"data: {payload}\n\n"
                 except Exception:
                     pass
         except Exception as e:
             if not closed_event.is_set():
                 try:
-                    yield f"data: [SYSTEM ERROR] {str(e)}\n\n"
+                    payload = json.dumps({'type': 'ansi', 'content': f"[SYSTEM ERROR] {str(e)}"})
+                    yield f"data: {payload}\n\n"
                 except Exception:
                     pass
         finally:
@@ -1085,109 +1115,53 @@ def stream():
                     del active_processes[user]
                     logging.info(f"Removed process entry for {user}")
 
-            # Session messages – raw ANSI
-            try:
-                ended_msg = "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"
-                tip_msg = "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
-                yield f"data: {ended_msg}\n\n"
-                yield f"data: {tip_msg}\n\n"
-                yield "data: CLOSE\n\n"
-            except GeneratorExit:
-                pass
-            except Exception:
-                pass
+            # Send session end messages only on normal exit (not when generator is closed)
+            if not got_generator_exit:
+                try:
+                    ended_msg = json.dumps({'type': 'ansi', 'content': "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"})
+                    tip_msg = json.dumps({'type': 'ansi', 'content': "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"})
+                    yield f"data: {ended_msg}\n\n"
+                    yield f"data: {tip_msg}\n\n"
+                    yield "data: CLOSE\n\n"
+                except GeneratorExit:
+                    pass
+                except Exception:
+                    pass
 
     response = Response(generate(), mimetype="text/event-stream")
     response.call_on_close(closed_event.set)
     return response
 
-
 @app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
 
-
-def kill_minecraft_java_processes():
-    """Find and kill Java processes that look like Minecraft clients (by command line)."""
-    logging.info("Searching for Minecraft Java processes...")
-    try:
-        # PowerShell: get PIDs of Java processes whose command line contains our JVM path or keywords
-        ps_command = """
-        Get-Process | Where-Object { $_.ProcessName -match 'java' } | ForEach-Object {
-            $p = $_
-            $cmd = (Get-WmiObject Win32_Process -Filter "ProcessId = $($p.Id)").CommandLine
-            if ($cmd -match 'java-runtime-delta' -or $cmd -match 'fabric' -or $cmd -match 'minecraft') {
-                Write-Output $p.Id
-            }
-        }
-        """
-        result = subprocess.run(
-            ["powershell", "-Command", ps_command],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            pids_found = set()
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    pids_found.add(int(line))
-            for pid in pids_found:
-                logging.info(f"Found candidate Minecraft Java process: PID {pid}")
-                kill_result = subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                if kill_result.returncode == 0:
-                    logging.info(f"Killed Java PID {pid}")
-                else:
-                    # Process may have died between discovery and kill attempt
-                    logging.debug(f"Could not kill Java PID {pid} (already terminated)")
-        else:
-            logging.error(f"PowerShell query failed: {result.stderr}")
-    except Exception as e:
-        logging.error(f"Error in kill_minecraft_java_processes: {e}")
-
-
 def kill_process_tree(proc):
-    """Kill a process and all its children using taskkill."""
+    """Kill a process and all its children using psutil."""
     if proc.poll() is not None:
         logging.debug(f"Process {proc.pid} already dead")
         return
     try:
-        # First try graceful termination
-        proc.terminate()
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception as e:
-        logging.error(f"Error terminating process {proc.pid}: {e}")
-    # Force kill the entire tree
-    subprocess.run(
-        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-        capture_output=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    logging.info(f"Force‑killed process tree with PID {proc.pid}")
-
-
-def cleanup_processes():
-    """Terminate any remaining Minecraft Java processes (launcher cleanup is optional)."""
-    logging.info("Cleaning up Minecraft Java processes...")
-    kill_minecraft_java_processes()
-    # The launcher process (portablemc) is already dead or will be reaped automatically
-    # No need to track or kill it separately
-
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        # Kill children first
+        for child in children:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        # Then kill the parent
+        parent.kill()
+        logging.info(f"Killed process tree for PID {proc.pid}")
+    except psutil.NoSuchProcess:
+        logging.debug(f"Process {proc.pid} already gone")
 
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
-    cleanup_processes()
+    with processes_lock:
+        for user, proc in list(active_processes.items()):
+            kill_process_tree(proc)
     sys.exit(0)
-
 
 # Set signal handler for SIGINT (Ctrl+C)
 signal.signal(signal.SIGINT, graceful_shutdown)
