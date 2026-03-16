@@ -231,10 +231,19 @@ HTML_TEMPLATE = r"""
             box-shadow: 0 0 0 4px rgba(106, 176, 255, 0.1) !important;
         }
 
-        input:-webkit-autofill {
-            -webkit-text-fill-color: white !important;
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover,
+        input:-webkit-autofill:focus,
+        input:-webkit-autofill:active {
             -webkit-box-shadow: 0 0 0px 1000px rgba(20, 20, 30, 0.9) inset !important;
-            transition: background-color 5000s ease-in-out 0s;
+            -webkit-text-fill-color: white !important;
+            transition: background-color 5000s ease-in-out 0s !important;
+            caret-color: #6ab0ff !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 24px !important;
+            background: rgba(255, 255, 255, 0.03) !important;
+            backdrop-filter: blur(10px) saturate(150%) !important;
+            -webkit-backdrop-filter: blur(10px) saturate(150%) !important;
         }
 
         .toggle-pass {
@@ -526,6 +535,7 @@ HTML_TEMPLATE = r"""
             document.head.appendChild(script);
         })();
     </script>
+
     <!-- Main application code – defines initApp -->
     <script>
         function initApp() {
@@ -561,7 +571,6 @@ HTML_TEMPLATE = r"""
             let shouldReloadOnReconnect = false;
             let forbiddenInterval = null;
 
-
             // Create ANSI converter instance
             let ansiConverter = null;
             if (typeof AnsiUp !== 'undefined') {
@@ -570,7 +579,7 @@ HTML_TEMPLATE = r"""
                 console.warn('AnsiUp not loaded; logs will be raw.');
             }
 
-            // --- WebSocket event handlers (unchanged) ---
+            // --- WebSocket event handlers ---
             socket.on('connect', function() {
                 console.log('WebSocket connected');
                 if (shouldReloadOnReconnect) {
@@ -615,7 +624,7 @@ HTML_TEMPLATE = r"""
                 statusDot.className = data.online ? 'status-dot online' : 'status-dot offline';
             });
 
-            // --- Core UI functions (unchanged) ---
+            // --- Core UI functions ---
             function appendLog(rawData) {
                 // Parse the JSON payload from the server
                 let data;
@@ -690,7 +699,7 @@ HTML_TEMPLATE = r"""
                 fadeTimer = setTimeout(() => consoleNode.classList.remove('active-scroll'), 1500);
             }
 
-            // --- UI event handlers (unchanged) ---
+            // --- UI event handlers ---
             function showPass() {
                 passField.type = "text";
                 document.getElementById('eyeIcon').style.fill = "#2563eb";
@@ -710,16 +719,14 @@ HTML_TEMPLATE = r"""
 
                 if (isMatch) {
                     passContainer.style.display = "block";
-                    warnText.style.display = "block";
                     passField.required = true;
-                    void passContainer.offsetHeight;
-                    void warnText.offsetHeight;
+                    warnText.style.display = "block";
+                    void passField.offsetHeight;
                 } else {
                     passContainer.style.display = "none";
-                    warnText.style.display = "none";
                     passField.required = false;
-                    void passContainer.offsetHeight;
-                    void warnText.offsetHeight;
+                    warnText.style.display = "none";
+                    void passField.offsetHeight;
                 }
             }
 
@@ -736,15 +743,18 @@ HTML_TEMPLATE = r"""
                 launchBtn.innerText = "INITIALIZING...";
                 loginCard.style.display = "none";
                 consoleNode.style.display = "block";
+                void consoleNode.offsetHeight;
                 logOutput.innerHTML = "";
                 currentGroup = null;
                 lastLineColor = '#ffffff';
 
+                let normalClose = false;
                 const eventSource = new EventSource(`/stream?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
                 currentEventSource = eventSource;
 
                 eventSource.onmessage = function(e) {
                     if (e.data === "CLOSE") {
+                        normalClose = true;
                         setTimeout(() => {
                             eventSource.close();
                             currentEventSource = null;
@@ -760,7 +770,9 @@ HTML_TEMPLATE = r"""
                 eventSource.onerror = function() {
                     eventSource.close();
                     currentEventSource = null;
-                    appendLog('[SYSTEM] CONNECTION LOST');
+                    if (!normalClose) {
+                        appendLog('[SYSTEM] CONNECTION LOST');
+                    }
                     launchBtn.disabled = false;
                     launchBtn.innerText = "INITIALIZE CORE";
                 };
@@ -789,7 +801,9 @@ HTML_TEMPLATE = r"""
 
             bgToggle.addEventListener('change', toggleBackground);
 
+            // Console click handler – only works when button is enabled (game ended or error)
             consoleNode.addEventListener('click', function() {
+                if (launchBtn.disabled) return; // Do nothing during game
                 loginCard.style.display = "block";
                 consoleNode.style.display = "none";
                 if (socket.connected) {
@@ -935,8 +949,13 @@ def stream():
 
     if not is_portablemc_available():
         def error_gen():
-            yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
-            yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
+            lines = [
+                "\x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m",
+                "\x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m"
+            ]
+            for line in lines:
+                payload = json.dumps({'type': 'ansi', 'content': line})
+                yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
         return Response(error_gen(), mimetype="text/event-stream")
 
@@ -944,20 +963,23 @@ def stream():
     user = request.args.get("username", "Player").strip()
     password = request.args.get("password", "")
 
-    # --- VALIDATIONS ---
+    # --- VALIDATIONS (JSON wrapped) ---
     if not user:
         def error_gen():
-            msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
-            yield f"data: {msg}\n\n"
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"})
+            yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
         return Response(error_gen(), mimetype="text/event-stream")
 
     if not VALID_USERNAME_REGEX.match(user):
         def error_gen():
-            msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
-            msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
-            yield f"data: {msg1}\n\n"
-            yield f"data: {msg2}\n\n"
+            lines = [
+                "\x1b[91m[!] INVALID USERNAME\x1b[0m",
+                "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
+            ]
+            for line in lines:
+                payload = json.dumps({'type': 'ansi', 'content': line})
+                yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
         return Response(error_gen(), mimetype="text/event-stream")
 
@@ -965,17 +987,25 @@ def stream():
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
     if user_lower in forbidden_lower and password != PASS_KEY:
         def error_gen():
-            msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
-            yield f"data: {msg}\n\n"
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"})
+            yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
-            busy_payload = json.dumps({'type': 'ansi', 'content': '\x1b[91m[!] CORE BUSY\x1b[0m'})
-            close_payload = "data: CLOSE\n\n"
-            return Response(f"data: {busy_payload}\n\n{close_payload}", mimetype="text/event-stream")
+            lines = [
+                "\x1b[91m[!] CORE BUSY\x1b[0m",
+                "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
+                "\x1b[90mPlease close the game before launching again.\x1b[0m"
+            ]
+            def error_gen():
+                for line in lines:
+                    payload = json.dumps({'type': 'ansi', 'content': line})
+                    yield f"data: {payload}\n\n"
+                yield "data: CLOSE\n\n"
+            return Response(error_gen(), mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
 
@@ -1023,7 +1053,12 @@ def stream():
                     yield "data: CLOSE\n\n"
                     return
 
-                # Start the process and register it immediately
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -1034,6 +1069,7 @@ def stream():
                     errors="replace",
                     bufsize=1,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    startupinfo=startupinfo
                 )
                 active_processes[user] = process
                 logging.info(f"Started process for {user} with PID {process.pid}")
@@ -1044,7 +1080,6 @@ def stream():
             ok_reached = False
 
             while True:
-                # Check for client disconnect
                 if closed_event.is_set():
                     disc_msg = json.dumps({'type': 'ansi', 'content': "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"})
                     try:
@@ -1067,7 +1102,6 @@ def stream():
 
                 progress_match = progress_re.search(raw_line)
 
-                # Decide which format to send
                 if use_server_conversion and ansi_converter:
                     try:
                         html_line = ansi_converter.convert(raw_line, full=False).strip()
@@ -1115,7 +1149,6 @@ def stream():
                     del active_processes[user]
                     logging.info(f"Removed process entry for {user}")
 
-            # Send session end messages only on normal exit (not when generator is closed)
             if not got_generator_exit:
                 try:
                     ended_msg = json.dumps({'type': 'ansi', 'content': "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"})
