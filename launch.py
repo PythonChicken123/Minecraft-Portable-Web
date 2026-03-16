@@ -10,7 +10,6 @@ import signal
 import shutil
 import threading
 import logging
-import traceback
 import psutil
 import os
 import json
