@@ -1,5 +1,4 @@
 from pathlib import Path
-from ansi2html import Ansi2HTMLConverter
 from flask import Flask, request, render_template_string, jsonify, Response
 from flask_socketio import SocketIO, emit
 import subprocess
@@ -11,7 +10,9 @@ import signal
 import shutil
 import threading
 import logging
+import psutil
 import os
+import json
 import importlib.util
 
 app = Flask(__name__)
@@ -38,10 +39,31 @@ processes_lock = threading.Lock()
 # Track connected clients
 connected_clients = 0
 clients_lock = threading.Lock()
-
-# ANSI to HTML converter (dark background, inline styles)
-ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
 logging.basicConfig(level=logging.INFO)
+
+# Fallbacks when certain libraries are restricted/corrupted/disabled
+try:
+    from ansi2html import Ansi2HTMLConverter
+
+    ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
+    use_server_conversion = True
+except ImportError:
+    # ansi2html not installed – fallback to raw ANSI
+    use_server_conversion = False
+    logging.warning("ansi2html not installed; client will handle ANSI conversion.")
+
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None
+    PSUTIL_AVAILABLE = False
+    logging.warning(
+        "psutil not installed; process tree killing is limited. "
+        "Install psutil for full cleanup."
+    )
+
 
 # --- HTML TEMPLATE (with 4-space indented JavaScript) ---
 HTML_TEMPLATE = r"""
@@ -78,7 +100,7 @@ HTML_TEMPLATE = r"""
             left: 0;
             width: 100%;
             height: 100%;
-            backdrop-filter: blur(8		px) saturate(180%);
+            backdrop-filter: blur(8px) saturate(180%);
             -webkit-backdrop-filter: blur(8px) saturate(180%);
             z-index: 0;
             pointer-events: none;
@@ -145,7 +167,7 @@ HTML_TEMPLATE = r"""
         }
 
         #forbidden-warn {
-            color: #ff5a5a;
+            color: #ff8a8a;  /* Brighter red */
             font-size: 9px;
             margin: 12px 0 6px 6px;
             font-weight: 700;
@@ -153,12 +175,12 @@ HTML_TEMPLATE = r"""
             text-transform: uppercase;
             letter-spacing: 0.5px;
             animation: pulse-red 1.8s infinite;
-            text-shadow: 0 0 8px rgba(255, 90, 90, 0.3);
+            text-shadow: 0 0 12px rgba(255, 138, 138, 0.5);
         }
 
         @keyframes pulse-red {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
+            0%, 100% { opacity: 1; text-shadow: 0 0 12px #ff8a8a; }
+            50% { opacity: 0.7; text-shadow: 0 0 20px #ff5a5a; }
         }
 
         .status-container {
@@ -178,11 +200,11 @@ HTML_TEMPLATE = r"""
         }
         .status-dot.online {
             background: #2ecc71;
-            box-shadow: 0 0 15px #2ecc71;
+            box-shadow: 0 0 15px #2ecc71, 0 0 30px rgba(46, 204, 113, 0.3);
         }
         .status-dot.offline {
             background: #e74c3c;
-            box-shadow: 0 0 15px #e74c3c;
+            box-shadow: 0 0 15px #e74c3c, 0 0 30px rgba(231, 76, 60, 0.3);
         }
 
         .subtitle {
@@ -207,7 +229,7 @@ HTML_TEMPLATE = r"""
             border-radius: 24px;
             color: white !important;
             font-size: 15px;
-            caret-color: #4d9eff !important;
+            caret-color: #6ab0ff !important; /* Brighter blue */
             outline: none !important;
             box-shadow: none !important;
             backdrop-filter: blur(10px) saturate(150%);
@@ -218,15 +240,24 @@ HTML_TEMPLATE = r"""
         }
 
         input:focus {
-            border-color: rgba(77, 158, 255, 0.5) !important;
+            border-color: rgba(106, 176, 255, 0.5) !important;
             background: rgba(255, 255, 255, 0.05) !important;
-            box-shadow: 0 0 0 4px rgba(77, 158, 255, 0.1) !important;
+            box-shadow: 0 0 0 4px rgba(106, 176, 255, 0.1) !important;
         }
 
-        input:-webkit-autofill {
-            -webkit-text-fill-color: white !important;
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover,
+        input:-webkit-autofill:focus,
+        input:-webkit-autofill:active {
             -webkit-box-shadow: 0 0 0px 1000px rgba(20, 20, 30, 0.9) inset !important;
-            transition: background-color 5000s ease-in-out 0s;
+            -webkit-text-fill-color: white !important;
+            transition: background-color 5000s ease-in-out 0s !important;
+            caret-color: #6ab0ff !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 24px !important;
+            background: rgba(255, 255, 255, 0.03) !important;
+            backdrop-filter: blur(10px) saturate(150%) !important;
+            -webkit-backdrop-filter: blur(10px) saturate(150%) !important;
         }
 
         .toggle-pass {
@@ -250,14 +281,14 @@ HTML_TEMPLATE = r"""
 
         .toggle-pass:hover svg {
             fill: white !important;
-            filter: drop-shadow(0 0 8px #4d9eff);
+            filter: drop-shadow(0 0 8px #6ab0ff);
         }
 
         button {
             width: 100%;
-            background: rgba(77, 158, 255, 0.2);
+            background: rgba(106, 176, 255, 0.2);
             color: white;
-            border: 1px solid rgba(77, 158, 255, 0.3);
+            border: 1px solid rgba(106, 176, 255, 0.3);
             padding: 18px 24px;
             border-radius: 28px;
             font-weight: 600;
@@ -272,17 +303,17 @@ HTML_TEMPLATE = r"""
         }
 
         button:hover:not(:disabled) {
-            background: rgba(77, 158, 255, 0.3);
-            border-color: rgba(77, 158, 255, 0.6);
+            background: rgba(106, 176, 255, 0.3);
+            border-color: rgba(106, 176, 255, 0.6);
             transform: translateY(-2px);
-            box-shadow: 0 20px 30px rgba(77, 158, 255, 0.2);
+            box-shadow: 0 20px 30px rgba(106, 176, 255, 0.2);
         }
 
         button:disabled {
-            background: rgba(180, 70, 70, 0.15) !important;
-            border: 1px solid rgba(255, 100, 100, 0.2) !important;
-            color: rgba(255, 160, 160, 0.6) !important;
-            text-shadow: 0 0 10px rgba(255, 0, 0, 0.2);
+            background: rgba(200, 70, 70, 0.15) !important;
+            border: 1px solid rgba(255, 120, 120, 0.2) !important;
+            color: rgba(255, 200, 200, 0.6) !important;
+            text-shadow: 0 0 10px rgba(255, 100, 100, 0.4);
             cursor: not-allowed;
             transform: none;
             box-shadow: none;
@@ -337,10 +368,10 @@ HTML_TEMPLATE = r"""
             letter-spacing: 1px;
         }
         #flask-status.online {
-            color: rgba(46, 204, 113, 0.5);
+            color: rgba(46, 204, 113, 0.7);
         }
         #flask-status.offline {
-            color: rgba(231, 76, 60, 0.5);
+            color: rgba(231, 76, 60, 0.7);
         }
 
         .log-group {
@@ -418,13 +449,13 @@ HTML_TEMPLATE = r"""
             border-radius: 50%;
         }
         input:checked + .slider {
-            background-color: rgba(77, 158, 255, 0.3);
-            border-color: rgba(77, 158, 255, 0.4);
+            background-color: rgba(106, 176, 255, 0.3);
+            border-color: rgba(106, 176, 255, 0.4);
         }
         input:checked + .slider:before {
             transform: translateX(20px);
-            background-color: #4d9eff;
-            box-shadow: 0 0 10px #4d9eff;
+            background-color: #6ab0ff;
+            box-shadow: 0 0 10px #6ab0ff;
         }
 
         .control-label {
@@ -495,6 +526,29 @@ HTML_TEMPLATE = r"""
     </div>
 
     <div class="watermark">PORTABLE_MC // APEX_V6.5</div>
+    <!-- ANSI UP 5.2.1 loader (local first, CDN fallback) -->
+    <script>
+        (function loadAnsiUp() {
+            var script = document.createElement('script');
+            script.src = '{{ url_for("static", filename="ansi_up.min.js") }}';
+            script.onload = function() {
+                console.log('✅ ansi_up loaded from local file');
+            };
+            script.onerror = function() {
+                console.warn('❌ Local ansi_up failed, loading from CDN...');
+                var fallback = document.createElement('script');
+                fallback.src = 'https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js';
+                fallback.onload = function() {
+                    console.log('✅ ansi_up loaded from CDN');
+                };
+                fallback.onerror = function() {
+                    console.error('❌ Both local and CDN ansi_up failed.');
+                };
+                document.head.appendChild(fallback);
+            };
+            document.head.appendChild(script);
+        })();
+    </script>
 
     <!-- Main application code – defines initApp -->
     <script>
@@ -511,6 +565,8 @@ HTML_TEMPLATE = r"""
             const bgToggle = document.getElementById('bgToggle');
             const statusDot = document.getElementById('statusDot');
             const flaskStatusText = document.getElementById('flask-status-text');
+
+            const timestampRegex = /^\[\d\d:\d\d:\d\d\]/;
 
             const socket = io({
                 reconnection: true,
@@ -529,6 +585,20 @@ HTML_TEMPLATE = r"""
             let shouldReloadOnReconnect = false;
             let forbiddenInterval = null;
 
+            // Create ANSI converter instance – try now, and again later if missing
+            let ansiConverter = null;
+            if (typeof AnsiUp !== 'undefined') {
+                ansiConverter = new AnsiUp();
+            } else {
+                console.warn('AnsiUp not loaded yet; will retry in 200ms');
+                setTimeout(() => {
+                    if (typeof AnsiUp !== 'undefined' && !ansiConverter) {
+                        ansiConverter = new AnsiUp();
+                        console.log('AnsiUp loaded late, converter created');
+                    }
+                }, 200);
+            }
+
             // --- WebSocket event handlers ---
             socket.on('connect', function() {
                 console.log('WebSocket connected');
@@ -537,10 +607,12 @@ HTML_TEMPLATE = r"""
                         sessionStorage.setItem('reloaded', 'true');
                         console.log('Server reconnected – reloading page for updates');
                         window.location.reload();
-                        return; // Stop further execution because page will reload
+                        return;
                     } else {
                         console.log('Server reconnected – reload already performed this session, continuing without reload');
-                        // Do not return; proceed with normal connection setup
+                        // Reset grouping state for the new connection
+                        currentGroup = null;
+                        lastLineColor = '#ffffff';
                     }
                 }
                 launchBtn.disabled = false;
@@ -573,19 +645,48 @@ HTML_TEMPLATE = r"""
             });
 
             // --- Core UI functions ---
-            function appendLog(htmlContent) {
+            function appendLog(rawData) {
+                // Parse the JSON payload from the server
+                let data;
+                try {
+                    data = JSON.parse(rawData);
+                } catch (e) {
+                    // If parsing fails, assume it's plain text (old format) – fallback
+                    data = { type: 'text', content: rawData };
+                }
+
                 const line = document.createElement('div');
                 line.className = 'log-line';
+
+                // Generate HTML content based on type
+                let htmlContent;
+                if (data.type === 'html') {
+                    // Already converted on server
+                    htmlContent = data.content;
+                } else if (data.type === 'ansi') {
+                    // Convert on client using ansi_up (if available)
+                    if (ansiConverter) {
+                        htmlContent = ansiConverter.ansi_to_html(data.content);
+                    } else {
+                        htmlContent = data.content; // raw fallback
+                    }
+                } else {
+                    // Plain text fallback
+                    htmlContent = data.content;
+                }
                 line.innerHTML = htmlContent;
 
-                const rawText = (line.textContent || line.innerText || '').trim();
-                const isNewLogLine = /^\[\d\d:\d\d:\d\d\]/.test(rawText);
+                // Determine if this is a new log line (starts with a timestamp)
+                const plainText = (line.textContent || line.innerText || '').trim();
+                const isNewLogLine = timestampRegex.test(plainText);
 
                 if (isNewLogLine) {
+                    // Start a new visual group
                     currentGroup = document.createElement('div');
                     currentGroup.className = 'log-group';
                     logOutput.appendChild(currentGroup);
 
+                    // Update the stored color from the last colored span in this line
                     const coloredSpans = line.querySelectorAll('span[style*="color"]');
                     if (coloredSpans.length > 0) {
                         const lastSpan = coloredSpans[coloredSpans.length - 1];
@@ -593,16 +694,19 @@ HTML_TEMPLATE = r"""
                     } else {
                         lastLineColor = '#ffffff';
                     }
-                } else if (rawText.length > 0) {
+                } else if (plainText.length > 0) {
+                    // Continuation line (stack trace, extra details)
                     line.classList.add('continuation-line');
                     line.style.color = lastLineColor;
                 }
 
+                // Ensure a group exists (for the first line or if the first line is a continuation)
                 if (!currentGroup) {
                     currentGroup = document.createElement('div');
                     currentGroup.className = 'log-group';
                     logOutput.appendChild(currentGroup);
                 }
+
                 currentGroup.appendChild(line);
 
                 consoleNode.scrollTop = consoleNode.scrollHeight;
@@ -635,16 +739,14 @@ HTML_TEMPLATE = r"""
 
                 if (isMatch) {
                     passContainer.style.display = "block";
-                    warnText.style.display = "block";
                     passField.required = true;
-                    void passContainer.offsetHeight;
-                    void warnText.offsetHeight;
+                    warnText.style.display = "block";
+                    void passField.offsetHeight;
                 } else {
                     passContainer.style.display = "none";
-                    warnText.style.display = "none";
                     passField.required = false;
-                    void passContainer.offsetHeight;
-                    void warnText.offsetHeight;
+                    warnText.style.display = "none";
+                    void passField.offsetHeight;
                 }
             }
 
@@ -661,15 +763,18 @@ HTML_TEMPLATE = r"""
                 launchBtn.innerText = "INITIALIZING...";
                 loginCard.style.display = "none";
                 consoleNode.style.display = "block";
+                void consoleNode.offsetHeight;
                 logOutput.innerHTML = "";
                 currentGroup = null;
                 lastLineColor = '#ffffff';
 
+                let normalClose = false;
                 const eventSource = new EventSource(`/stream?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
                 currentEventSource = eventSource;
 
                 eventSource.onmessage = function(e) {
                     if (e.data === "CLOSE") {
+                        normalClose = true;
                         setTimeout(() => {
                             eventSource.close();
                             currentEventSource = null;
@@ -685,7 +790,9 @@ HTML_TEMPLATE = r"""
                 eventSource.onerror = function() {
                     eventSource.close();
                     currentEventSource = null;
-                    appendLog('[SYSTEM] CONNECTION LOST');
+                    if (!normalClose) {
+                        appendLog('[SYSTEM] CONNECTION LOST');
+                    }
                     launchBtn.disabled = false;
                     launchBtn.innerText = "INITIALIZE CORE";
                 };
@@ -714,7 +821,9 @@ HTML_TEMPLATE = r"""
 
             bgToggle.addEventListener('change', toggleBackground);
 
+            // Console click handler – only works when button is enabled (game ended or error)
             consoleNode.addEventListener('click', function() {
+                if (launchBtn.disabled) return; // Do nothing during game
                 loginCard.style.display = "block";
                 consoleNode.style.display = "none";
                 if (socket.connected) {
@@ -776,7 +885,6 @@ HTML_TEMPLATE = r"""
                     if (document.readyState === 'loading') {
                         document.addEventListener('DOMContentLoaded', markSocketIoFailure);
                     } else {
-                        // DOM is already parsed; update on next tick to ensure button exists
                         setTimeout(markSocketIoFailure, 0);
                     }
                     return;
@@ -789,7 +897,7 @@ HTML_TEMPLATE = r"""
                 script.src = src;
                 script.onload = function() {
                     console.log(`✅ Successfully loaded: ${src}`);
-                    initApp();
+                    initApp(); // initApp is defined and ansi_up already loaded
                 };
                 script.onerror = function() {
                     console.warn(`❌ Failed to load: ${src}`);
@@ -867,8 +975,13 @@ def stream():
     if not is_portablemc_available():
 
         def error_gen():
-            yield "data: \x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m\n\n"
-            yield "data: \x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m\n\n"
+            lines = [
+                "\x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m",
+                "\x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m",
+            ]
+            for line in lines:
+                payload = json.dumps({"type": "ansi", "content": line})
+                yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
 
         return Response(error_gen(), mimetype="text/event-stream")
@@ -877,14 +990,14 @@ def stream():
     user = request.args.get("username", "Player").strip()
     password = request.args.get("password", "")
 
-    # --- VALIDATIONS (same as before) ---
+    # --- VALIDATIONS (JSON wrapped) ---
     if not user:
 
         def error_gen():
-            msg = "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"
-            escaped = escape_html(msg)
-            html_msg = ansi_converter.convert(escaped, full=False).strip()
-            yield f"data: {html_msg}\n\n"
+            payload = json.dumps(
+                {"type": "ansi", "content": "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"}
+            )
+            yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
 
         return Response(error_gen(), mimetype="text/event-stream")
@@ -892,14 +1005,13 @@ def stream():
     if not VALID_USERNAME_REGEX.match(user):
 
         def error_gen():
-            msg1 = "\x1b[91m[!] INVALID USERNAME\x1b[0m"
-            msg2 = "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
-            escaped1 = escape_html(msg1)
-            escaped2 = escape_html(msg2)
-            html1 = ansi_converter.convert(escaped1, full=False).strip()
-            html2 = ansi_converter.convert(escaped2, full=False).strip()
-            yield f"data: {html1}\n\n"
-            yield f"data: {html2}\n\n"
+            lines = [
+                "\x1b[91m[!] INVALID USERNAME\x1b[0m",
+                "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m",
+            ]
+            for line in lines:
+                payload = json.dumps({"type": "ansi", "content": line})
+                yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
 
         return Response(error_gen(), mimetype="text/event-stream")
@@ -909,10 +1021,13 @@ def stream():
     if user_lower in forbidden_lower and password != PASS_KEY:
 
         def error_gen():
-            msg = "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"
-            escaped = escape_html(msg)
-            html_msg = ansi_converter.convert(escaped, full=False).strip()
-            yield f"data: {html_msg}\n\n"
+            payload = json.dumps(
+                {
+                    "type": "ansi",
+                    "content": "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m",
+                }
+            )
+            yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
 
         return Response(error_gen(), mimetype="text/event-stream")
@@ -920,17 +1035,16 @@ def stream():
     # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
     with processes_lock:
         if user in active_processes and active_processes[user].poll() is None:
+            lines = [
+                "\x1b[91m[!] CORE BUSY\x1b[0m",
+                "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
+                "\x1b[90mPlease close the game before launching again.\x1b[0m",
+            ]
 
             def error_gen():
-                lines = [
-                    "\x1b[91m[!] CORE BUSY\x1b[0m",
-                    "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                    "\x1b[90mPlease close the game before launching again.\x1b[0m",
-                ]
                 for line in lines:
-                    escaped = escape_html(line)
-                    html_line = ansi_converter.convert(escaped, full=False).strip()
-                    yield f"data: {html_line}\n\n"
+                    payload = json.dumps({"type": "ansi", "content": line})
+                    yield f"data: {payload}\n\n"
                 yield "data: CLOSE\n\n"
 
             return Response(error_gen(), mimetype="text/event-stream")
@@ -961,20 +1075,43 @@ def stream():
 
     def generate():
         process = None
+        got_generator_exit = False
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                shell=False,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-
+            # --- ATOMIC PROCESS CREATION AND TRACKING ---
             with processes_lock:
+                # Double-check that no process for this user is still running
+                if user in active_processes and active_processes[user].poll() is None:
+                    busy_payload = json.dumps(
+                        {"type": "ansi", "content": "\x1b[91m[!] CORE BUSY\x1b[0m"}
+                    )
+                    yield f"data: {busy_payload}\n\n"
+                    yield "data: CLOSE\n\n"
+                    return
+
+                environment = os.environ.copy()
+                environment["__compat_layer"] = "runasinvoker"
+
+                startupinfo = None
+                if os.name == "nt":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+
+                # SAFE: shell=False, all arguments are separate list elements.
+                # The 'user' input is passed as a single argument, never executed.
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    shell=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    startupinfo=startupinfo,
+                    env=environment,
+                )
                 active_processes[user] = process
                 logging.info(f"Started process for {user} with PID {process.pid}")
 
@@ -985,13 +1122,15 @@ def stream():
 
             while True:
                 if closed_event.is_set():
-                    disc_msg = ansi_converter.convert(
-                        escape_html("\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"),
-                        full=False,
-                    ).strip()
+                    disc_msg = json.dumps(
+                        {
+                            "type": "ansi",
+                            "content": "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m",
+                        }
+                    )
                     try:
                         yield f"data: {disc_msg}\n\n"
-                    except (BrokenPipeError, OSError):
+                    except (BrokenPipeError, OSError, GeneratorExit):
                         pass
                     break
 
@@ -1008,37 +1147,56 @@ def stream():
                     ok_reached = True
 
                 progress_match = progress_re.search(raw_line)
-                escaped = escape_html(raw_line)
-                html_line = ansi_converter.convert(escaped, full=False).strip()
 
-                if progress_match and not ok_reached:
-                    current_file = progress_match.group(1)
-                    if (
-                        current_file != last_progress
-                        and (now - last_send_time) > update_interval
-                    ):
-                        try:
-                            yield f"data: {html_line}\n\n"
-                        except (BrokenPipeError, OSError):
-                            break
-                        last_progress = current_file
-                        last_send_time = now
-                else:
+                if use_server_conversion and ansi_converter:
                     try:
-                        yield f"data: {html_line}\n\n"
-                    except (BrokenPipeError, OSError):
-                        break
+                        safe_line = escape_html(raw_line)
+                        html_line = ansi_converter.convert(
+                            safe_line, full=False
+                        ).strip()
+                        payload = json.dumps({"type": "html", "content": html_line})
+                    except Exception as e:
+                        logging.error(f"Conversion failed: {e}, sending raw ANSI")
+                        payload = json.dumps({"type": "ansi", "content": raw_line})
+                else:
+                    payload = json.dumps({"type": "ansi", "content": raw_line})
+
+                try:
+                    if progress_match and not ok_reached:
+                        current_file = progress_match.group(1)
+                        if (
+                            current_file != last_progress
+                            and (now - last_send_time) > update_interval
+                        ):
+                            yield f"data: {payload}\n\n"
+                            last_progress = current_file
+                            last_send_time = now
+                    else:
+                        yield f"data: {payload}\n\n"
+                except (BrokenPipeError, OSError, GeneratorExit) as e:
+                    if isinstance(e, GeneratorExit):
+                        got_generator_exit = True
+                    break
 
         except FileNotFoundError as e:
             if not closed_event.is_set():
                 try:
-                    yield f"data: \x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m\n\n"
+                    payload = json.dumps(
+                        {
+                            "type": "ansi",
+                            "content": f"\x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m",
+                        }
+                    )
+                    yield f"data: {payload}\n\n"
                 except Exception:
                     pass
         except Exception as e:
             if not closed_event.is_set():
                 try:
-                    yield f"data: [SYSTEM ERROR] {str(e)}\n\n"
+                    payload = json.dumps(
+                        {"type": "ansi", "content": f"[SYSTEM ERROR] {str(e)}"}
+                    )
+                    yield f"data: {payload}\n\n"
                 except Exception:
                     pass
         finally:
@@ -1050,33 +1208,27 @@ def stream():
                     del active_processes[user]
                     logging.info(f"Removed process entry for {user}")
 
-            # Session messages – errors are ignored, we still want CLOSE
-            try:
-                ended_msg = ansi_converter.convert(
-                    escape_html("\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"), full=False
-                ).strip()
-                tip_msg = ansi_converter.convert(
-                    escape_html(
-                        "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"
-                    ),
-                    full=False,
-                ).strip()
-                yield f"data: {ended_msg}\n\n"
-                yield f"data: {tip_msg}\n\n"
-            except GeneratorExit:
-                # Generator is being closed – exit without yielding further
-                pass
-            except Exception:
-                # Log or ignore – but proceed to CLOSE
-                pass
-
-            # Always try to send CLOSE, even if above failed
-            try:
-                yield "data: CLOSE\n\n"
-            except GeneratorExit:
-                pass
-            except Exception:
-                pass
+            if not got_generator_exit:
+                try:
+                    ended_msg = json.dumps(
+                        {
+                            "type": "ansi",
+                            "content": "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m",
+                        }
+                    )
+                    tip_msg = json.dumps(
+                        {
+                            "type": "ansi",
+                            "content": "\x1b[34m[TIP] Click the console to return to login.\x1b[0m",
+                        }
+                    )
+                    yield f"data: {ended_msg}\n\n"
+                    yield f"data: {tip_msg}\n\n"
+                    yield "data: CLOSE\n\n"
+                except GeneratorExit:
+                    pass
+                except Exception:
+                    pass
 
     response = Response(generate(), mimetype="text/event-stream")
     response.call_on_close(closed_event.set)
@@ -1088,85 +1240,40 @@ def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
 
 
-def kill_minecraft_java_processes():
-    """Find and kill Java processes that look like Minecraft clients (by command line)."""
-    logging.info("Searching for Minecraft Java processes...")
-    try:
-        # PowerShell: get PIDs of Java processes whose command line contains our JVM path or keywords
-        ps_command = """
-        Get-Process | Where-Object { $_.ProcessName -match 'java' } | ForEach-Object {
-            $p = $_
-            $cmd = (Get-WmiObject Win32_Process -Filter "ProcessId = $($p.Id)").CommandLine
-            if ($cmd -match 'java-runtime-delta' -or $cmd -match 'fabric' -or $cmd -match 'minecraft') {
-                Write-Output $p.Id
-            }
-        }
-        """
-        result = subprocess.run(
-            ["powershell", "-Command", ps_command],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            pids_found = set()
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    pids_found.add(int(line))
-            for pid in pids_found:
-                logging.info(f"Found candidate Minecraft Java process: PID {pid}")
-                kill_result = subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                if kill_result.returncode == 0:
-                    logging.info(f"Killed Java PID {pid}")
-                else:
-                    # Process may have died between discovery and kill attempt
-                    logging.debug(f"Could not kill Java PID {pid} (already terminated)")
-        else:
-            logging.error(f"PowerShell query failed: {result.stderr}")
-    except Exception as e:
-        logging.error(f"Error in kill_minecraft_java_processes: {e}")
-
-
 def kill_process_tree(proc):
-    """Kill a process and all its children using taskkill."""
+    """Kill a process and all its children. Falls back to simple kill if psutil missing."""
     if proc.poll() is not None:
         logging.debug(f"Process {proc.pid} already dead")
         return
-    try:
-        # First try graceful termination
-        proc.terminate()
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception as e:
-        logging.error(f"Error terminating process {proc.pid}: {e}")
-    # Force kill the entire tree
-    subprocess.run(
-        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-        capture_output=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    logging.info(f"Force‑killed process tree with PID {proc.pid}")
 
-
-def cleanup_processes():
-    """Terminate any remaining Minecraft Java processes (launcher cleanup is optional)."""
-    logging.info("Cleaning up Minecraft Java processes...")
-    kill_minecraft_java_processes()
-    # The launcher process (portablemc) is already dead or will be reaped automatically
-    # No need to track or kill it separately
+    if PSUTIL_AVAILABLE:
+        try:
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            parent.kill()
+            logging.info(f"Killed process tree for PID {proc.pid}")
+        except psutil.NoSuchProcess:
+            logging.debug(f"Process {proc.pid} already gone")
+    else:
+        # Fallback: terminate the main process only
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logging.info(f"Terminated process PID {proc.pid} (psutil unavailable)")
 
 
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
-    cleanup_processes()
+    with processes_lock:
+        for user, proc in list(active_processes.items()):
+            kill_process_tree(proc)
     sys.exit(0)
 
 
