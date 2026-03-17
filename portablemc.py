@@ -1076,7 +1076,6 @@ def stream():
     progress_re = re.compile(r"(\d+/\d+)")
 
     def generate():
-        # ... (the rest of the generator remains unchanged) ...
         process = None
         got_generator_exit = False
         try:
