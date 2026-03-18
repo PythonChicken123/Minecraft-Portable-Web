@@ -7,13 +7,13 @@ Run with any Python (e.g., system 3.11) to set up and launch the launcher.
 
 import os
 import sys
-import ssl
 import subprocess
 import urllib.request
 import zipfile
 import tarfile
 import shutil
 import platform
+import ssl
 from pathlib import Path
 
 # --- Windows-only guard ---
@@ -27,7 +27,7 @@ EMBEDDED_PYTHON = EMBEDDED_DIR / "python.exe"
 PYTHON_VERSION = "3.14.3"
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html"]
+BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]   
 PORTABLEMC_BIN_DIR = Path(__file__).parent / "portablemc_bin"
 
 # --- OS and architecture detection (for portablemc binary) ---
@@ -76,12 +76,24 @@ def ensure_embedded_python():
     if EMBEDDED_PYTHON.exists():
         print("✅ Embedded Python already exists.")
         return True
+
     print("📥 Downloading embedded Python...")
+    # Try with verification first
     try:
         urllib.request.urlretrieve(PYTHON_URL, "python-embed.zip")
     except Exception as e:
-        print(f"❌ Failed to download Python: {e}")
-        return False
+        print(f"⚠️ First download attempt failed: {e}")
+        print("📥 Retrying with SSL verification disabled (insecure)...")
+        try:
+            # Create an unverified SSL context
+            ssl_context = ssl._create_unverified_context()
+            with urllib.request.urlopen(PYTHON_URL, context=ssl_context) as response:
+                with open("python-embed.zip", 'wb') as out_file:
+                    out_file.write(response.read())
+        except Exception as e2:
+            print(f"❌ Failed to download Python even with unverified SSL: {e2}")
+            return False
+
     print("📦 Extracting...")
     with zipfile.ZipFile("python-embed.zip", "r") as zip_ref:
         zip_ref.extractall(EMBEDDED_DIR)
@@ -106,6 +118,25 @@ def fix_pth_file():
         print("ℹ️ site-packages already enabled.")
     return True
 
+def test_embedded_python():
+    """Test if the embedded Python executable can be run."""
+    try:
+        result = subprocess.run([str(EMBEDDED_PYTHON), "--version"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            print(f"✅ Embedded Python runs: {result.stdout.strip()}")
+            return True
+        else:
+            print(f"❌ Embedded Python test failed: {result.stderr}")
+            return False
+    except OSError as e:
+        # Common error: WinError 1260 (group policy block)
+        print(f"❌ Cannot run embedded Python (blocked by group policy?): {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Embedded Python test error: {e}")
+        return False
+
 def download_get_pip():
     pip_script = EMBEDDED_DIR / "get-pip.py"
     if pip_script.exists():
@@ -114,7 +145,7 @@ def download_get_pip():
 
     print("📥 Downloading get-pip.py (ignoring SSL cert for this request)...")
     try:
-        # Create an unverified SSL context to bypass the certificate error
+        # Create an unverified SSL context to bypass certificate errors
         ssl_context = ssl._create_unverified_context()
         with urllib.request.urlopen(GET_PIP_URL, context=ssl_context) as response:
             with open(pip_script, 'wb') as out_file:
@@ -169,6 +200,21 @@ def install_base_packages():
             return False
     return True
 
+def get_certifi_path():
+    """Return the path to certifi's CA bundle, or None if certifi not installed."""
+    try:
+        result = subprocess.run(
+            [str(EMBEDDED_PYTHON), "-c", "import certifi; print(certifi.where())"],
+            capture_output=True, text=True, check=True,
+            env={"PYTHONNOUSERSITE": "1"}  # ensure isolation
+        )
+        path = result.stdout.strip()
+        if path and Path(path).exists():
+            return path
+    except Exception:
+        pass
+    return None
+
 def download_portablemc_binary():
     url = get_portablemc_url()
     if not url:
@@ -176,10 +222,20 @@ def download_portablemc_binary():
     print(f"📥 Downloading portablemc from {url}...")
     archive_path = Path(__file__).parent / "portablemc_download"
     try:
+        # Attempt with verification first
         urllib.request.urlretrieve(url, archive_path)
     except Exception as e:
-        print(f"❌ Failed to download: {e}")
-        return False
+        print(f"⚠️ First download attempt failed: {e}")
+        print("📥 Retrying with SSL verification disabled (insecure)...")
+        try:
+            ssl_context = ssl._create_unverified_context()
+            with urllib.request.urlopen(url, context=ssl_context) as response:
+                with open(archive_path, 'wb') as out_file:
+                    out_file.write(response.read())
+        except Exception as e2:
+            print(f"❌ Failed to download even with unverified SSL: {e2}")
+            return False
+
     PORTABLEMC_BIN_DIR.mkdir(exist_ok=True)
     try:
         if url.endswith(".zip"):
@@ -268,6 +324,11 @@ def launch_launcher(method):
     env["PYTHONPATH"] = ""
     env["PORTABLEMC_METHOD"] = method
 
+    cert_path = get_certifi_path()
+    if cert_path:
+        env["SSL_CERT_FILE"] = cert_path
+        env["REQUESTS_CA_BUNDLE"] = cert_path
+
     cmd = [str(EMBEDDED_PYTHON), str(launcher_script)]
     print(f"🚀 Launching: {' '.join(cmd)}")
     try:
@@ -285,6 +346,12 @@ def main():
         sys.exit(1)
     if not fix_pth_file():
         sys.exit(1)
+    if not test_embedded_python():
+        print("❌ Embedded Python cannot be executed. Please check group policy or run without embedded isolation.")
+        print("   You may try to run portablemc.py directly with your system Python after installing dependencies:")
+        print("   pip install flask flask-socketio psutil ansi2html portablemc")
+        sys.exit(1)
+
     # Check pip
     env_check = os.environ.copy()
     env_check["PYTHONNOUSERSITE"] = "1"
@@ -297,11 +364,14 @@ def main():
             sys.exit(1)
     else:
         print(f"✅ pip already installed: {pip_check.stdout.strip()}")
+
     if not install_base_packages():
         sys.exit(1)
+
     method = ensure_portablemc()
     if not method:
         sys.exit(1)
+
     print("✅ Setup complete. Launching portablemc.py...")
     launch_launcher(method)
 
