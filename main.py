@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Cross‑platform bootstrap script for embedded Python 3.14.
+Cross‑platform bootstrap script for embedded Python 3.14 (Windows only).
 Attempts to download the native portablemc binary, falls back to pip.
 Run with any Python (e.g., system 3.11) to set up and launch the launcher.
 """
 
 import os
 import sys
+import ssl
 import subprocess
 import urllib.request
 import zipfile
@@ -14,6 +15,11 @@ import tarfile
 import shutil
 import platform
 from pathlib import Path
+
+# --- Windows-only guard ---
+if platform.system().lower() != 'windows':
+    print("❌ This bootstrap script currently only supports Windows.")
+    sys.exit(1)
 
 # --- Configuration ---
 EMBEDDED_DIR = Path(__file__).parent / "python"
@@ -24,7 +30,7 @@ GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html"]
 PORTABLEMC_BIN_DIR = Path(__file__).parent / "portablemc_bin"
 
-# --- OS and architecture detection ---
+# --- OS and architecture detection (for portablemc binary) ---
 SYSTEM = platform.system().lower()
 MACHINE = platform.machine().lower()
 
@@ -105,9 +111,15 @@ def download_get_pip():
     if pip_script.exists():
         print("✅ get-pip.py already present.")
         return pip_script
-    print("📥 Downloading get-pip.py...")
+
+    print("📥 Downloading get-pip.py (ignoring SSL cert for this request)...")
     try:
-        urllib.request.urlretrieve(GET_PIP_URL, pip_script)
+        # Create an unverified SSL context to bypass the certificate error
+        ssl_context = ssl._create_unverified_context()
+        with urllib.request.urlopen(GET_PIP_URL, context=ssl_context) as response:
+            with open(pip_script, 'wb') as out_file:
+                out_file.write(response.read())
+        print("✅ get-pip.py downloaded successfully.")
     except Exception as e:
         print(f"❌ Failed to download get-pip.py: {e}")
         return None
@@ -119,6 +131,7 @@ def run_pip_command(args, isolated=True):
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONPATH"] = ""
     cmd = [str(EMBEDDED_PYTHON)] + args
+    # SAFE: args are static or come from trusted BASE_PACKAGES
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"❌ Pip command failed: {' '.join(args)}")
@@ -206,17 +219,20 @@ def test_portablemc():
                 print("✅ portablemc binary works.")
                 return "binary"
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            print("⏱️ portablemc binary check timed out or not found, trying module.")
+
     # Try module
     env = os.environ.copy()
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = ""
     cmd = [str(EMBEDDED_PYTHON), "-m", "portablemc", "--help"]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
-        print("✅ portablemc module works.")
-        return "module"
-    print("❌ portablemc not available.")
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            print("✅ portablemc module works.")
+            return "module"
+    except subprocess.TimeoutExpired:
+        print("⏱️ portablemc module check timed out, assuming not available.")
     return None
 
 def ensure_portablemc():
@@ -264,7 +280,7 @@ def launch_launcher(method):
     return True
 
 def main():
-    print("=== Embedded Python Bootstrap (Cross‑platform) ===")
+    print("=== Embedded Python Bootstrap (Windows only) ===")
     if not ensure_embedded_python():
         sys.exit(1)
     if not fix_pth_file():
