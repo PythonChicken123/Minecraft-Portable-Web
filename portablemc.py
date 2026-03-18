@@ -1,309 +1,1246 @@
-#!/usr/bin/env python3
-"""
-Cross‑platform bootstrap script for embedded Python 3.14 (Windows only).
-Attempts to download the native portablemc binary, falls back to pip.
-Run with any Python (e.g., system 3.11) to set up and launch the launcher.
-"""
-
-import os
-import sys
-import ssl
-import subprocess
-import urllib.request
-import zipfile
-import tarfile
-import shutil
-import platform
 from pathlib import Path
+from flask import Flask, request, render_template_string, jsonify, Response
+from flask_socketio import SocketIO, emit
+import subprocess
+import sys
+import socket
+import time
+import re
+import signal
+import shutil
+import threading
+import logging
+import traceback
+import os
+import json
+import importlib.util
 
-# --- Windows-only guard ---
-if platform.system().lower() != 'windows':
-    print("❌ This bootstrap script currently only supports Windows.")
-    sys.exit(1)
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# --- Configuration ---
-EMBEDDED_DIR = Path(__file__).parent / "python"
-EMBEDDED_PYTHON = EMBEDDED_DIR / "python.exe"
-PYTHON_VERSION = "3.14.3"
-PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
-GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html"]
-PORTABLEMC_BIN_DIR = Path(__file__).parent / "portablemc_bin"
+def escape_html(s):
+    """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-# --- OS and architecture detection (for portablemc binary) ---
-SYSTEM = platform.system().lower()
-MACHINE = platform.machine().lower()
+# --- CONFIGURATION ---
+VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
+FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
+PASS_KEY = "1234"
+SERVER_IP = "77.103.184.72"
+# SERVER_IP = "eu.chickencraft.nl"
+JVM_OPTS = "-Xmx3G -Xms3G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M -XX:+AlwaysPreTouch -XX:+ParallelRefProcEnabled -XX:+DisableExplicitGC"
 
-ARCH_MAP = {
-    'x86_64': 'x86_64',
-    'amd64': 'x86_64',
-    'i686': 'i686',
-    'i386': 'i686',
-    'aarch64': 'aarch64',
-    'arm64': 'aarch64',
-    'armv7l': 'arm-gnueabihf',
-    'arm': 'arm-gnueabihf',
-}
+# Thread-safe process tracking
+active_processes = {}
+processes_lock = threading.Lock()
 
-OS_MAP = {
-    'windows': 'windows',
-    'linux': 'linux',
-    'darwin': 'macos',
-}
+# Track connected clients
+connected_clients = 0
+clients_lock = threading.Lock()
+logging.basicConfig(level=logging.INFO)
 
-def get_portablemc_url():
-    """Return the download URL for the native portablemc binary, or None."""
-    os_name = OS_MAP.get(SYSTEM)
-    if not os_name:
-        print(f"⚠️ Unsupported OS: {SYSTEM}")
-        return None
-    arch = ARCH_MAP.get(MACHINE, 'x86_64')
-    if os_name == 'macos':
-        arch = 'aarch64' if arch == 'aarch64' else 'x86_64'
-    if os_name == 'linux' and arch not in ('arm-gnueabihf',):
-        arch += '-gnu'
-    base = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/"
-    if os_name == 'windows':
-        ext = "zip"
-        filename = f"portablemc-5.0.2-{os_name}-{arch}-msvc.{ext}"
+# Optional psutil for process tree killing
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None
+    PSUTIL_AVAILABLE = False
+    logging.warning(
+        "psutil not installed; process tree killing is limited. "
+        "Install psutil for full cleanup."
+    )
+
+# Fallbacks when certain libraries are restricted/corrupted/disabled
+try:
+    from ansi2html import Ansi2HTMLConverter
+    ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
+    use_server_conversion = True
+except ImportError:
+    # ansi2html not installed – fallback to raw ANSI
+    use_server_conversion = False
+    logging.warning("ansi2html not installed; client will handle ANSI conversion.")
+
+# --- HTML TEMPLATE (with 4-space indented JavaScript) ---
+HTML_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Minecraft - Java Edition</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: #0a0a0a;
+            overflow: hidden;
+        }
+
+        body.show-bg {
+            background: radial-gradient(circle at 20% 30%, rgba(20, 40, 80, 0.4) 0%, rgba(0, 0, 0, 0.8) 100%),
+                        url('/static/bg.png') no-repeat center center fixed;
+            background-size: cover;
+        }
+
+        .blur-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            backdrop-filter: blur(8px) saturate(180%);
+            -webkit-backdrop-filter: blur(8px) saturate(180%);
+            z-index: 0;
+            pointer-events: none;
+            display: none;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        body.show-bg .blur-overlay {
+            display: block;
+        }
+
+        .main-container {
+            position: relative;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            width: 100%;
+            margin-top: -5vh;
+            animation: appEntry 1s ease-out;
+        }
+
+        @keyframes appEntry {
+            0% { opacity: 0; transform: scale(1.05); filter: blur(10px); }
+            100% { opacity: 1; transform: scale(1); filter: blur(0); }
+        }
+
+        .top-logo {
+            width: 550px;
+            max-width: 90%;
+            margin-bottom: 40px;
+            filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.8));
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+
+        .glass-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+            background: rgba(15, 15, 20, 0.6);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 40px;
+            width: 440px;
+            padding: 48px 52px;
+            text-align: center;
+            color: white;
+            animation: float 6s ease-in-out infinite;
+            box-shadow: 0 40px 80px rgba(0, 0, 0, 0.8),
+                        inset 0 0 30px rgba(255, 255, 255, 0.02);
+        }
+
+        form {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+        }
+
+        #forbidden-warn {
+            color: #ff8a8a;  /* Brighter red */
+            font-size: 9px;
+            margin: 12px 0 6px 6px;
+            font-weight: 700;
+            text-align: left;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            animation: pulse-red 1.8s infinite;
+            text-shadow: 0 0 12px rgba(255, 138, 138, 0.5);
+        }
+
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; text-shadow: 0 0 12px #ff8a8a; }
+            50% { opacity: 0.7; text-shadow: 0 0 20px #ff5a5a; }
+        }
+
+        .status-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            margin-bottom: 24px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            transition: box-shadow 0.3s ease;
+        }
+        .status-dot.online {
+            background: #2ecc71;
+            box-shadow: 0 0 15px #2ecc71, 0 0 30px rgba(46, 204, 113, 0.3);
+        }
+        .status-dot.offline {
+            background: #e74c3c;
+            box-shadow: 0 0 15px #e74c3c, 0 0 30px rgba(231, 76, 60, 0.3);
+        }
+
+        .subtitle {
+            font-size: 10px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.4);
+            font-weight: 600;
+        }
+
+        .input-wrapper {
+            position: relative;
+            width: 100%;
+            margin-bottom: 12px;
+        }
+
+        input {
+            width: 100%;
+            padding: 18px 22px;
+            background: rgba(255, 255, 255, 0.03) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 24px;
+            color: white !important;
+            font-size: 15px;
+            caret-color: #6ab0ff !important; /* Brighter blue */
+            outline: none !important;
+            box-shadow: none !important;
+            backdrop-filter: blur(10px) saturate(150%);
+            -webkit-backdrop-filter: blur(10px) saturate(150%);
+            appearance: none;
+            -webkit-appearance: none;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            border-color: rgba(106, 176, 255, 0.5) !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+            box-shadow: 0 0 0 4px rgba(106, 176, 255, 0.1) !important;
+        }
+
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover,
+        input:-webkit-autofill:focus,
+        input:-webkit-autofill:active {
+            -webkit-box-shadow: 0 0 0px 1000px rgba(20, 20, 30, 0.9) inset !important;
+            -webkit-text-fill-color: white !important;
+            transition: background-color 5000s ease-in-out 0s !important;
+            caret-color: #6ab0ff !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            border-radius: 24px !important;
+            background: rgba(255, 255, 255, 0.03) !important;
+            backdrop-filter: blur(10px) saturate(150%) !important;
+            -webkit-backdrop-filter: blur(10px) saturate(150%) !important;
+        }
+
+        .toggle-pass {
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            z-index: 10;
+            padding: 8px;
+        }
+
+        .toggle-pass svg {
+            width: 20px;
+            height: 20px;
+            fill: rgba(255, 255, 255, 0.5) !important;
+            transition: all 0.2s ease;
+        }
+
+        .toggle-pass:hover svg {
+            fill: white !important;
+            filter: drop-shadow(0 0 8px #6ab0ff);
+        }
+
+        button {
+            width: 100%;
+            background: rgba(106, 176, 255, 0.2);
+            color: white;
+            border: 1px solid rgba(106, 176, 255, 0.3);
+            padding: 18px 24px;
+            border-radius: 28px;
+            font-weight: 600;
+            font-size: 14px;
+            letter-spacing: 1.5px;
+            cursor: pointer;
+            margin-top: 20px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+        }
+
+        button:hover:not(:disabled) {
+            background: rgba(106, 176, 255, 0.3);
+            border-color: rgba(106, 176, 255, 0.6);
+            transform: translateY(-2px);
+            box-shadow: 0 20px 30px rgba(106, 176, 255, 0.2);
+        }
+
+        button:disabled {
+            background: rgba(200, 70, 70, 0.15) !important;
+            border: 1px solid rgba(255, 120, 120, 0.2) !important;
+            color: rgba(255, 200, 200, 0.6) !important;
+            text-shadow: 0 0 10px rgba(255, 100, 100, 0.4);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* --- LIVE CONSOLE --- */
+        #console-container {
+            display: none;
+            width: 85%;
+            max-width: 1200px;
+            height: 65%;
+            background: rgba(8, 8, 12, 0.85);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 32px;
+            padding: 28px 32px;
+            overflow-y: auto;
+            text-align: left;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            color: #ffffff;
+            box-shadow: 0 50px 100px rgba(0, 0, 0, 0.9);
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+            transition: all 0.3s ease;
+        }
+
+        #console-container:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 70px 140px rgba(0, 0, 0, 1);
+        }
+
+        #console-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #console-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            transition: background 0.3s;
+        }
+
+        #console-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.25);
+        }
+
+        #flask-status {
+            font-size: 8px;
+            margin-top: -10px;
+            margin-bottom: 10px;
+            color: rgba(255, 255, 255, 0.3);
+            letter-spacing: 1px;
+        }
+        #flask-status.online {
+            color: rgba(46, 204, 113, 0.7);
+        }
+        #flask-status.offline {
+            color: rgba(231, 76, 60, 0.7);
+        }
+
+        .log-group {
+            border-left: 2px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 6px;
+            padding-left: 2px;
+            background: none;
+        }
+
+        .log-line {
+            font-size: 13px;
+            padding: 2px 0 2px 16px;
+            line-height: 1.5;
+            background: none;
+            margin: 0;
+            font-family: inherit;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .log-line.continuation-line {
+            padding-left: 18px;
+            opacity: 0.9;
+        }
+
+        /* --- AMBIENT MODE WIDGET --- */
+        .controls {
+            position: fixed;
+            bottom: 32px;
+            left: 32px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.4);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            padding: 10px 18px;
+            border-radius: 36px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .switch {
+            position: relative;
+            width: 40px;
+            height: 20px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.1);
+            transition: 0.3s;
+            border-radius: 34px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 2px;
+            bottom: 1px;
+            background-color: rgba(255, 255, 255, 0.7);
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: rgba(106, 176, 255, 0.3);
+            border-color: rgba(106, 176, 255, 0.4);
+        }
+        input:checked + .slider:before {
+            transform: translateX(20px);
+            background-color: #6ab0ff;
+            box-shadow: 0 0 10px #6ab0ff;
+        }
+
+        .control-label {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-weight: 500;
+        }
+
+        .watermark {
+            position: fixed;
+            bottom: 32px;
+            right: 32px;
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.2);
+            font-weight: 400;
+            letter-spacing: 3px;
+            pointer-events: none;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body id="bodyNode">
+    <div class="blur-overlay"></div>
+
+    <div class="controls">
+        <label class="switch">
+            <input type="checkbox" id="bgToggle">
+            <span class="slider"></span>
+        </label>
+        <span class="control-label">Ambient Mode</span>
+    </div>
+
+    <div class="main-container" id="main-ui">
+        <img src="/static/logo.svg" class="top-logo">
+        <div class="glass-card" id="login-card">
+            <div class="status-container">
+                <div id="statusDot" class="status-dot"></div>
+                <div class="subtitle">Minecraft Java 1.21.11</div>
+            </div>
+            <div id="flask-status" style="font-size: 8px; margin-top: -10px; margin-bottom: 10px; color: rgba(255,255,255,0.3);">
+                Flask: <span id="flask-status-text">Connected</span>
+            </div>
+            {% if error %}<div style="color:#ff5555; font-size:11px; margin-bottom:20px; font-weight:800; text-transform:uppercase;">{{ error }}</div>{% endif %}
+            
+            <form id="launchForm">
+                <div class="input-wrapper">
+                    <input type="text" id="username" name="username" placeholder="Username" autocomplete="off">
+                    <div id="forbidden-warn" style="display:none; color:#ff5555; font-size:9px; margin-top:8px; font-weight:800; text-align:left;">[!] RESTRICTED IDENTITY DETECTED</div>
+                </div>
+
+                <div id="pass-container" class="input-wrapper" style="display:none;">
+                    <input type="password" id="password" name="password" placeholder="SECURE_KEY">
+                    <div class="toggle-pass">
+                        <svg id="eyeIcon" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" /></svg>
+                    </div>
+                </div>
+
+                <button type="submit" id="launchBtn">INITIALIZE CORE</button>
+            </form>
+        </div>
+
+        <div id="console-container">
+            <div style="border-bottom:1px solid rgba(0,255,136,0.2); padding-bottom:15px; margin-bottom:20px; font-size:10px; letter-spacing:3px;">SYSTEM_CORE // LIVE_LOGS</div>
+            <div id="log-output"></div>
+        </div>
+    </div>
+
+    <div class="watermark">PORTABLE_MC // APEX_V6.5</div>
+    <!-- ANSI UP 5.2.1 loader (local first, CDN fallback) -->
+    <script>
+        (function loadAnsiUp() {
+            var script = document.createElement('script');
+            script.src = '{{ url_for("static", filename="ansi_up.min.js") }}';
+            script.onload = function() {
+                console.log('✅ ansi_up loaded from local file');
+            };
+            script.onerror = function() {
+                console.warn('❌ Local ansi_up failed, loading from CDN...');
+                var fallback = document.createElement('script');
+                fallback.src = 'https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js';
+                fallback.onload = function() {
+                    console.log('✅ ansi_up loaded from CDN');
+                };
+                fallback.onerror = function() {
+                    console.error('❌ Both local and CDN ansi_up failed.');
+                };
+                document.head.appendChild(fallback);
+            };
+            document.head.appendChild(script);
+        })();
+    </script>
+
+    <!-- Main application code – defines initApp -->
+    <script>
+        function initApp() {
+            const forbidden = {{ forbidden_list | tojson }};
+            const consoleNode = document.getElementById('console-container');
+            const loginCard = document.getElementById('login-card');
+            const launchBtn = document.getElementById('launchBtn');
+            const logOutput = document.getElementById('log-output');
+            const userField = document.getElementById('username');
+            const passField = document.getElementById('password');
+            const passContainer = document.getElementById('pass-container');
+            const warnText = document.getElementById('forbidden-warn');
+            const bgToggle = document.getElementById('bgToggle');
+            const statusDot = document.getElementById('statusDot');
+            const flaskStatusText = document.getElementById('flask-status-text');
+
+            const timestampRegex = /^\[\d\d:\d\d:\d\d\]/;
+
+            const socket = io({
+                reconnection: true,
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                timeout: 2000
+            });
+
+            let currentEventSource = null;
+            let fadeTimer = null;
+            let currentGroup = null;
+            let lastLineColor = '#ffffff';
+            let lastCheckedUser = '';
+            let minecraftStatusInterval = null;
+            let shouldReloadOnReconnect = false;
+            let forbiddenInterval = null;
+
+            // Create ANSI converter instance – try now, and again later if missing
+            let ansiConverter = null;
+            if (typeof AnsiUp !== 'undefined') {
+                ansiConverter = new AnsiUp();
+            } else {
+                console.warn('AnsiUp not loaded yet; will retry in 200ms');
+                setTimeout(() => {
+                    if (typeof AnsiUp !== 'undefined' && !ansiConverter) {
+                        ansiConverter = new AnsiUp();
+                        console.log('AnsiUp loaded late, converter created');
+                    }
+                }, 200);
+            }
+
+            // --- WebSocket event handlers ---
+            socket.on('connect', function() {
+                console.log('WebSocket connected');
+                if (shouldReloadOnReconnect) {
+                    if (!sessionStorage.getItem('reloaded')) {
+                        sessionStorage.setItem('reloaded', 'true');
+                        console.log('Server reconnected – reloading page for updates');
+                        window.location.reload();
+                        return;
+                    } else {
+                        console.log('Server reconnected – reload already performed this session, continuing without reload');
+                        // Reset grouping state for the new connection
+                        currentGroup = null;
+                        lastLineColor = '#ffffff';
+                    }
+                }
+                launchBtn.disabled = false;
+                launchBtn.innerText = "INITIALIZE CORE";
+                flaskStatusText.innerText = 'Connected';
+                flaskStatusText.style.color = '#2ecc71';
+                socket.emit('ping_minecraft');
+                if (minecraftStatusInterval) clearInterval(minecraftStatusInterval);
+                minecraftStatusInterval = setInterval(() => {
+                    if (socket.connected) socket.emit('ping_minecraft');
+                }, 10000);
+            });
+
+            socket.on('disconnect', function(reason) {
+                console.log('WebSocket disconnected:', reason);
+                launchBtn.disabled = true;
+                launchBtn.innerText = "CORE OFFLINE";
+                flaskStatusText.innerText = 'Disconnected';
+                flaskStatusText.style.color = '#e74c3c';
+                statusDot.className = 'status-dot offline';
+                if (minecraftStatusInterval) {
+                    clearInterval(minecraftStatusInterval);
+                    minecraftStatusInterval = null;
+                }
+                shouldReloadOnReconnect = true;
+            });
+
+            socket.on('minecraft_status', function(data) {
+                statusDot.className = data.online ? 'status-dot online' : 'status-dot offline';
+            });
+
+            // --- Core UI functions ---
+            function appendLog(rawData) {
+                // Parse the JSON payload from the server
+                let data;
+                try {
+                    data = JSON.parse(rawData);
+                } catch (e) {
+                    // If parsing fails, assume it's plain text (old format) – fallback
+                    data = { type: 'text', content: rawData };
+                }
+
+                const line = document.createElement('div');
+                line.className = 'log-line';
+
+                // Generate HTML content based on type
+                let htmlContent;
+                if (data.type === 'html') {
+                    // Already converted on server
+                    htmlContent = data.content;
+                } else if (data.type === 'ansi') {
+                    // Convert on client using ansi_up (if available)
+                    if (ansiConverter) {
+                        htmlContent = ansiConverter.ansi_to_html(data.content);
+                    } else {
+                        htmlContent = data.content; // raw fallback
+                    }
+                } else {
+                    // Plain text fallback
+                    htmlContent = data.content;
+                }
+                line.innerHTML = htmlContent;
+
+                // Determine if this is a new log line (starts with a timestamp)
+                const plainText = (line.textContent || line.innerText || '').trim();
+                const isNewLogLine = timestampRegex.test(plainText);
+
+                if (isNewLogLine) {
+                    // Start a new visual group
+                    currentGroup = document.createElement('div');
+                    currentGroup.className = 'log-group';
+                    logOutput.appendChild(currentGroup);
+
+                    // Update the stored color from the last colored span in this line
+                    const coloredSpans = line.querySelectorAll('span[style*="color"]');
+                    if (coloredSpans.length > 0) {
+                        const lastSpan = coloredSpans[coloredSpans.length - 1];
+                        lastLineColor = lastSpan.style.color;
+                    } else {
+                        lastLineColor = '#ffffff';
+                    }
+                } else if (plainText.length > 0) {
+                    // Continuation line (stack trace, extra details)
+                    line.classList.add('continuation-line');
+                    line.style.color = lastLineColor;
+                }
+
+                // Ensure a group exists (for the first line or if the first line is a continuation)
+                if (!currentGroup) {
+                    currentGroup = document.createElement('div');
+                    currentGroup.className = 'log-group';
+                    logOutput.appendChild(currentGroup);
+                }
+
+                currentGroup.appendChild(line);
+
+                consoleNode.scrollTop = consoleNode.scrollHeight;
+                triggerScrollFade();
+            }
+
+            function triggerScrollFade() {
+                consoleNode.classList.add('active-scroll');
+                if (fadeTimer) clearTimeout(fadeTimer);
+                fadeTimer = setTimeout(() => consoleNode.classList.remove('active-scroll'), 1500);
+            }
+
+            // --- UI event handlers ---
+            function showPass() {
+                passField.type = "text";
+                document.getElementById('eyeIcon').style.fill = "#2563eb";
+            }
+
+            function hidePass() {
+                passField.type = "password";
+                document.getElementById('eyeIcon').style.fill = "rgba(255, 255, 255, 0.6)";
+            }
+
+            function checkForbidden() {
+                const currentUser = userField.value.trim().toLowerCase();
+                if (currentUser === lastCheckedUser) return;
+                lastCheckedUser = currentUser;
+                console.log(`[checkForbidden] username: "${currentUser}"`);
+                const isMatch = forbidden.some(name => name.toLowerCase() === currentUser);
+
+                if (isMatch) {
+                    passContainer.style.display = "block";
+                    passField.required = true;
+                    warnText.style.display = "block";
+                    void passField.offsetHeight;
+                } else {
+                    passContainer.style.display = "none";
+                    passField.required = false;
+                    warnText.style.display = "none";
+                    void passField.offsetHeight;
+                }
+            }
+
+            async function startLaunch() {
+                if (currentEventSource) {
+                    currentEventSource.close();
+                    currentEventSource = null;
+                }
+                const user = userField.value;
+                const pass = passField.value;
+                localStorage.setItem('last_mc_user', user);
+
+                launchBtn.disabled = true;
+                launchBtn.innerText = "INITIALIZING...";
+                loginCard.style.display = "none";
+                consoleNode.style.display = "block";
+                void consoleNode.offsetHeight;
+                logOutput.innerHTML = "";
+                currentGroup = null;
+                lastLineColor = '#ffffff';
+
+                let normalClose = false;
+                const eventSource = new EventSource(`/stream?username=${encodeURIComponent(user)}&password=${encodeURIComponent(pass)}`);
+                currentEventSource = eventSource;
+
+                eventSource.onmessage = function(e) {
+                    if (e.data === "CLOSE") {
+                        normalClose = true;
+                        setTimeout(() => {
+                            eventSource.close();
+                            currentEventSource = null;
+                            consoleNode.style.cursor = "pointer";
+                            launchBtn.disabled = false;
+                            launchBtn.innerText = "INITIALIZE CORE";
+                        }, 500);
+                        return;
+                    }
+                    appendLog(e.data);
+                };
+
+                eventSource.onerror = function() {
+                    eventSource.close();
+                    currentEventSource = null;
+                    if (!normalClose) {
+                        appendLog('[SYSTEM] CONNECTION LOST');
+                    }
+                    launchBtn.disabled = false;
+                    launchBtn.innerText = "INITIALIZE CORE";
+                };
+            }
+
+            function toggleBackground() {
+                const active = bgToggle.checked;
+                document.getElementById('bodyNode').classList.toggle('show-bg', active);
+                localStorage.setItem('ambient_mode', active ? 'on' : 'off');
+            }
+
+            // --- Set up event listeners ---
+            document.getElementById('launchForm').addEventListener('submit', (e) => {
+                e.preventDefault();
+                startLaunch();
+            });
+
+            userField.addEventListener('input', checkForbidden);
+            userField.addEventListener('change', checkForbidden);
+            userField.addEventListener('paste', () => setTimeout(checkForbidden, 10));
+
+            const togglePass = document.querySelector('.toggle-pass');
+            togglePass.addEventListener('mousedown', showPass);
+            togglePass.addEventListener('mouseup', hidePass);
+            togglePass.addEventListener('mouseleave', hidePass);
+
+            bgToggle.addEventListener('change', toggleBackground);
+
+            // Console click handler – only works when button is enabled (game ended or error)
+            consoleNode.addEventListener('click', function() {
+                if (launchBtn.disabled) return; // Do nothing during game
+                loginCard.style.display = "block";
+                consoleNode.style.display = "none";
+                if (socket.connected) {
+                    launchBtn.disabled = false;
+                    launchBtn.innerText = "INITIALIZE CORE";
+                } else {
+                    launchBtn.disabled = true;
+                    launchBtn.innerText = "CORE OFFLINE";
+                }
+            });
+
+            consoleNode.addEventListener('scroll', triggerScrollFade);
+            consoleNode.addEventListener('mousemove', triggerScrollFade);
+
+            const savedUser = localStorage.getItem('last_mc_user');
+            if (savedUser) userField.value = savedUser;
+            const savedMode = localStorage.getItem('ambient_mode');
+            if (savedMode === 'on' || savedMode === null) {
+                bgToggle.checked = true;
+                document.getElementById('bodyNode').classList.add('show-bg');
+            }
+
+            forbiddenInterval = setInterval(checkForbidden, 500);
+            window.addEventListener('beforeunload', function() {
+                clearInterval(forbiddenInterval);
+            });
+
+            window.addEventListener('focus', checkForbidden);
+            checkForbidden();
+        }
+    </script>
+
+    <!-- Socket.IO version dynamic fallback loader -->
+    <script>
+        (function loadSocketIO() {
+            const versions = [
+                '4.8.3', '4.7.2', '4.6.2', '4.5.4', '4.4.4',
+                '4.3.5', '4.2.2', '4.1.2', '4.0.1'
+            ];
+            let currentIndex = -1;
+
+            function tryNext() {
+                if (currentIndex === -1) {
+                    console.log('Attempting to load local socket.io.js...');
+                    loadScript('{{ url_for("static", filename="socket.io.js") }}');
+                } else if (currentIndex < versions.length) {
+                    const ver = versions[currentIndex];
+                    console.log(`Attempting CDN version ${ver}...`);
+                    loadScript(`https://cdn.socket.io/${ver}/socket.io.min.js`);
+                } else {
+                    console.error('All Socket.IO sources failed.');
+                    const markSocketIoFailure = function() {
+                        const btn = document.getElementById('launchBtn');
+                        if (btn) {
+                            btn.disabled = true;
+                            btn.innerText = 'SOCKET.IO LOAD FAILED';
+                        }
+                    };
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', markSocketIoFailure);
+                    } else {
+                        setTimeout(markSocketIoFailure, 0);
+                    }
+                    return;
+                }
+                currentIndex++;
+            }
+
+            function loadScript(src) {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = function() {
+                    console.log(`✅ Successfully loaded: ${src}`);
+                    initApp(); // initApp is defined and ansi_up already loaded
+                };
+                script.onerror = function() {
+                    console.warn(`❌ Failed to load: ${src}`);
+                    tryNext();
+                };
+                document.head.appendChild(script);
+            }
+
+            tryNext();
+        })();
+    </script>
+</body>
+</html>
+"""
+
+# --- ROUTES ---
+@socketio.on('connect')
+def handle_connect():
+    global connected_clients
+    with clients_lock:
+        connected_clients += 1
+        client_id = request.sid
+        print(f'Client connected: {client_id} (Total: {connected_clients})')
+    emit('status', {'core': 'online', 'minecraft': 'checking'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    global connected_clients
+    with clients_lock:
+        connected_clients -= 1
+        client_id = request.sid
+        print(f'Client disconnected: {client_id} (Total: {connected_clients})')
+
+@socketio.on('ping_minecraft')
+def handle_ping_minecraft():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.5)
+        s.connect((SERVER_IP, 25565))
+        s.close()
+        emit('minecraft_status', {'online': True})
+    except Exception:
+        emit('minecraft_status', {'online': False})
+
+@app.route("/ping")
+def ping():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.5)
+        s.connect((SERVER_IP, 25565))
+        s.close()
+        return jsonify(online=True)
+    except Exception:
+        return jsonify(online=False), 200
+
+@app.route("/stream")
+def stream():
+    # --- PORTABLEMC AVAILABILITY CHECK ---
+    def is_portablemc_available():
+        if shutil.which("portablemc"):
+            return True
+        return importlib.util.find_spec("portablemc") is not None
+
+    if not is_portablemc_available():
+        def error_gen():
+            lines = [
+                "\x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m",
+                "\x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m"
+            ]
+            for line in lines:
+                payload = json.dumps({'type': 'ansi', 'content': line})
+                yield f"data: {payload}\n\n"
+            yield "data: CLOSE\n\n"
+        return Response(error_gen(), mimetype="text/event-stream")
+
+    # --- GET USER INPUT ---
+    user = request.args.get("username", "Player").strip()
+    password = request.args.get("password", "")
+
+    # --- VALIDATIONS (JSON wrapped) ---
+    if not user:
+        def error_gen():
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"})
+            yield f"data: {payload}\n\n"
+            yield "data: CLOSE\n\n"
+        return Response(error_gen(), mimetype="text/event-stream")
+
+    if not VALID_USERNAME_REGEX.match(user):
+        def error_gen():
+            lines = [
+                "\x1b[91m[!] INVALID USERNAME\x1b[0m",
+                "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
+            ]
+            for line in lines:
+                payload = json.dumps({'type': 'ansi', 'content': line})
+                yield f"data: {payload}\n\n"
+            yield "data: CLOSE\n\n"
+        return Response(error_gen(), mimetype="text/event-stream")
+
+    user_lower = user.lower()
+    forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
+    if user_lower in forbidden_lower and password != PASS_KEY:
+        def error_gen():
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"})
+            yield f"data: {payload}\n\n"
+            yield "data: CLOSE\n\n"
+        return Response(error_gen(), mimetype="text/event-stream")
+
+    # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
+    with processes_lock:
+        if user in active_processes and active_processes[user].poll() is None:
+            lines = [
+                "\x1b[91m[!] CORE BUSY\x1b[0m",
+                "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
+                "\x1b[90mPlease close the game before launching again.\x1b[0m"
+            ]
+            def error_gen():
+                for line in lines:
+                    payload = json.dumps({'type': 'ansi', 'content': line})
+                    yield f"data: {payload}\n\n"
+                yield "data: CLOSE\n\n"
+            return Response(error_gen(), mimetype="text/event-stream")
+        if user in active_processes:
+            del active_processes[user]
+
+    # --- BUILD COMMAND (with binary vs module adaptation) ---
+    using_binary = os.environ.get("PORTABLEMC_METHOD") == "binary"
+
+    # Launcher command – tied directly to the method, not PATH
+    if using_binary:
+        launcher_cmd = ["portablemc"]
     else:
-        ext = "tar.gz"
-        filename = f"portablemc-5.0.2-{os_name}-{arch}.{ext}"
-    return base + filename
+        launcher_cmd = [sys.executable, "-m", "portablemc"]
 
-# --- Helper functions ---
-def ensure_embedded_python():
-    if EMBEDDED_PYTHON.exists():
-        print("✅ Embedded Python already exists.")
-        return True
-    print("📥 Downloading embedded Python...")
-    try:
-        urllib.request.urlretrieve(PYTHON_URL, "python-embed.zip")
-    except Exception as e:
-        print(f"❌ Failed to download Python: {e}")
-        return False
-    print("📦 Extracting...")
-    with zipfile.ZipFile("python-embed.zip", "r") as zip_ref:
-        zip_ref.extractall(EMBEDDED_DIR)
-    os.remove("python-embed.zip")
-    print("✅ Embedded Python ready.")
-    return True
+    # Global arguments (before 'start')
+    global_args = ["--main-dir", "."]
+    if not using_binary:
+        # Python module supports these extras
+        global_args.extend(["--timeout", "60", "--output", "human-color"])
 
-def fix_pth_file():
-    pth_files = list(EMBEDDED_DIR.glob("*._pth"))
-    if not pth_files:
-        print("❌ No ._pth file found; cannot enable site-packages.")
-        return False
-    pth = pth_files[0]
-    with open(pth, "r") as f:
-        content = f.read()
-    if "import site" in content and "#import site" in content:
-        content = content.replace("#import site", "import site")
-        with open(pth, "w") as f:
-            f.write(content)
-        print("✅ Enabled site-packages in ._pth file.")
+    # Start‑specific arguments
+    start_args = []
+    if using_binary:
+        # Binary uses --join-server
+        start_args.extend(["--join-server", SERVER_IP])
     else:
-        print("ℹ️ site-packages already enabled.")
-    return True
+        # Python module uses --server
+        start_args.extend(["--server", SERVER_IP])
 
-def download_get_pip():
-    pip_script = EMBEDDED_DIR / "get-pip.py"
-    if pip_script.exists():
-        print("✅ get-pip.py already present.")
-        return pip_script
+    # JVM arguments
+    if using_binary:
+        # Binary expects --jvm-arg=OPT1,OPT2,OPT3
+        jvm_opts_combined = ",".join(JVM_OPTS.split())
+        start_args.append(f"--jvm-arg={jvm_opts_combined}")
+    else:
+        # Python module accepts a single --jvm-args string
+        start_args.extend(["--jvm-args", JVM_OPTS])
 
-    print("📥 Downloading get-pip.py (ignoring SSL cert for this request)...")
-    try:
-        # Create an unverified SSL context to bypass the certificate error
-        ssl_context = ssl._create_unverified_context()
-        with urllib.request.urlopen(GET_PIP_URL, context=ssl_context) as response:
-            with open(pip_script, 'wb') as out_file:
-                out_file.write(response.read())
-        print("✅ get-pip.py downloaded successfully.")
-    except Exception as e:
-        print(f"❌ Failed to download get-pip.py: {e}")
-        return None
-    return pip_script
+    # Version (fabric:)
+    start_args.append("fabric:")
 
-def run_pip_command(args, isolated=True):
-    env = os.environ.copy()
-    if isolated:
-        env["PYTHONNOUSERSITE"] = "1"
-        env["PYTHONPATH"] = ""
-    cmd = [str(EMBEDDED_PYTHON)] + args
-    # SAFE: args are static or come from trusted BASE_PACKAGES
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ Pip command failed: {' '.join(args)}")
-        print(result.stderr)
-        return False
-    print(result.stdout)
-    return True
+    # Username
+    start_args.extend(["-u", user])
 
-def install_pip():
-    pip_script = download_get_pip()
-    if not pip_script:
-        return False
-    env = os.environ.copy()
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONPATH"] = ""
-    cmd = [str(EMBEDDED_PYTHON), str(pip_script),
-           "--trusted-host=files.pythonhosted.org",
-           "--trusted-host=pypi.org"]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("❌ Failed to install pip.")
-        print(result.stderr)
-        return False
-    print("✅ pip installed.")
-    return True
+    # Custom Java path (supported by both)
+    java_exe = "java.exe" if os.name == "nt" else "java"
+    java_bin = Path.cwd() / "jvm" / "java-runtime-delta" / "bin" / java_exe
+    if java_bin.exists():
+        # Insert --jvm and its path right after the server arguments
+        # Current start_args: [server args, jvm args, version, -u user]
+        # We want to insert before the version, so after the server args.
+        # Server args are two elements, so index 2.
+        start_args[2:2] = ["--jvm", str(java_bin)]
 
-def install_base_packages():
-    print("📦 Installing base packages...")
-    if not run_pip_command(["-m", "pip", "install", "--upgrade", "pip"], isolated=True):
-        print("⚠️ Pip upgrade failed, continuing anyway.")
-    for pkg in BASE_PACKAGES:
-        print(f"   Installing {pkg}...")
-        if not run_pip_command(["-m", "pip", "install", pkg], isolated=True):
-            print(f"❌ Failed to install {pkg}.")
-            return False
-    return True
+    # Full command
+    cmd = launcher_cmd + global_args + ["start"] + start_args
 
-def download_portablemc_binary():
-    url = get_portablemc_url()
-    if not url:
-        return False
-    print(f"📥 Downloading portablemc from {url}...")
-    archive_path = Path(__file__).parent / "portablemc_download"
-    try:
-        urllib.request.urlretrieve(url, archive_path)
-    except Exception as e:
-        print(f"❌ Failed to download: {e}")
-        return False
-    PORTABLEMC_BIN_DIR.mkdir(exist_ok=True)
-    try:
-        if url.endswith(".zip"):
-            with zipfile.ZipFile(archive_path, "r") as zip_ref:
-                zip_ref.extractall(PORTABLEMC_BIN_DIR)
-        else:
-            with tarfile.open(archive_path, "r:gz") as tar_ref:
-                tar_ref.extractall(PORTABLEMC_BIN_DIR)
-    except Exception as e:
-        print(f"❌ Failed to extract archive: {e}")
-        return False
-    finally:
-        archive_path.unlink(missing_ok=True)
-    # Move all extracted files to the root of PORTABLEMC_BIN_DIR
-    for item in PORTABLEMC_BIN_DIR.iterdir():
-        if item.is_dir():
-            for sub in item.iterdir():
-                sub.rename(PORTABLEMC_BIN_DIR / sub.name)
-            item.rmdir()
-    print(f"✅ portablemc binary extracted to {PORTABLEMC_BIN_DIR}")
-    return True
+    # --- DISCONNECT DETECTION ---
+    closed_event = threading.Event()
+    progress_re = re.compile(r"(\d+/\d+)")
 
-def test_portablemc():
-    """Check if portablemc is available (binary or module). Returns 'binary' or 'module' or None."""
-    # Try binary first
-    exe_name = "portablemc.exe" if SYSTEM == "windows" else "portablemc"
-    binary_path = PORTABLEMC_BIN_DIR / exe_name
-    if binary_path.exists():
-        if SYSTEM != "windows":
-            binary_path.chmod(binary_path.stat().st_mode | 0o111)
-        env = os.environ.copy()
-        env["PATH"] = str(PORTABLEMC_BIN_DIR) + os.pathsep + env.get("PATH", "")
+    def generate():
+        process = None
+        got_generator_exit = False
         try:
-            result = subprocess.run([str(binary_path), "--help"], env=env,
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                print("✅ portablemc binary works.")
-                return "binary"
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            print("⏱️ portablemc binary check timed out or not found, trying module.")
+            with processes_lock:
+                if user in active_processes and active_processes[user].poll() is None:
+                    busy_payload = json.dumps({'type': 'ansi', 'content': '\x1b[91m[!] CORE BUSY\x1b[0m'})
+                    yield f"data: {busy_payload}\n\n"
+                    yield "data: CLOSE\n\n"
+                    return
 
-    # Try module
-    env = os.environ.copy()
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONPATH"] = ""
-    cmd = [str(EMBEDDED_PYTHON), "-m", "portablemc", "--help"]
-    try:
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            print("✅ portablemc module works.")
-            return "module"
-    except subprocess.TimeoutExpired:
-        print("⏱️ portablemc module check timed out, assuming not available.")
-    return None
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
 
-def ensure_portablemc():
-    """Make portablemc available – try binary, fallback to pip. Returns method string or None."""
-    method = test_portablemc()
-    if method:
-        return method
-    if download_portablemc_binary():
-        method = test_portablemc()
-        if method:
-            return method
-        print("⚠️ Binary download failed, falling back to pip.")
-    print("📦 Installing portablemc via pip...")
-    if run_pip_command(["-m", "pip", "install", "portablemc"], isolated=True):
-        method = test_portablemc()
-        if method:
-            return method
-    return None
+                # SAFE: shell=False, all arguments are separate list elements.
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    shell=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    startupinfo=startupinfo
+                )
+                active_processes[user] = process
+                logging.info(f"Started process for {user} with PID {process.pid}")
 
-def launch_launcher(method):
-    launcher_script = Path(__file__).parent / "portablemc.py"
-    if not launcher_script.exists():
-        print("❌ portablemc.py not found in the same directory.")
-        return False
+            last_progress = ""
+            last_send_time = time.perf_counter()
+            update_interval = 0.15
+            ok_reached = False
 
-    env = os.environ.copy()
-    paths = [str(EMBEDDED_DIR), str(EMBEDDED_DIR / "Scripts"), str(PORTABLEMC_BIN_DIR)]
-    env["PATH"] = os.pathsep.join(paths) + os.pathsep + env.get("PATH", "")
-    env["__compat_layer"] = "runasinvoker"
-    env["PYTHONHOME"] = str(EMBEDDED_DIR)
-    env["CLICOLOR_FORCE"] = "1"
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONPATH"] = ""
-    env["PORTABLEMC_METHOD"] = method
+            while True:
+                if closed_event.is_set():
+                    disc_msg = json.dumps({'type': 'ansi', 'content': "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"})
+                    try:
+                        yield f"data: {disc_msg}\n\n"
+                    except (BrokenPipeError, OSError, GeneratorExit):
+                        pass
+                    break
 
-    cmd = [str(EMBEDDED_PYTHON), str(launcher_script)]
-    print(f"🚀 Launching: {' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, env=env, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Launcher exited with error: {e}")
-        return False
-    except KeyboardInterrupt:
-        print("⏹️ Interrupted by user.")
-    return True
+                line = process.stdout.readline()
+                if not line:
+                    if process.poll() is not None:
+                        break
+                    continue
 
-def main():
-    print("=== Embedded Python Bootstrap (Windows only) ===")
-    if not ensure_embedded_python():
-        sys.exit(1)
-    if not fix_pth_file():
-        sys.exit(1)
-    # Check pip
-    env_check = os.environ.copy()
-    env_check["PYTHONNOUSERSITE"] = "1"
-    env_check["PYTHONPATH"] = ""
-    pip_check = subprocess.run([str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
-                               env=env_check, capture_output=True, text=True)
-    if pip_check.returncode != 0:
-        print("📦 pip not found, installing...")
-        if not install_pip():
-            sys.exit(1)
+                raw_line = line.rstrip('\n')
+                now = time.perf_counter()
+
+                if not ok_reached and "[ OK ]" in raw_line:
+                    ok_reached = True
+
+                progress_match = progress_re.search(raw_line)
+
+                if use_server_conversion and ansi_converter:
+                    try:
+                        safe_line = escape_html(raw_line)
+                        html_line = ansi_converter.convert(safe_line, full=False).strip()
+                        payload = json.dumps({'type': 'html', 'content': html_line})
+                    except Exception as e:
+                        logging.error(f"Conversion failed: {e}, sending raw ANSI")
+                        payload = json.dumps({'type': 'ansi', 'content': raw_line})
+                else:
+                    payload = json.dumps({'type': 'ansi', 'content': raw_line})
+
+                try:
+                    if progress_match and not ok_reached:
+                        current_file = progress_match.group(1)
+                        if current_file != last_progress and (now - last_send_time) > update_interval:
+                            yield f"data: {payload}\n\n"
+                            last_progress = current_file
+                            last_send_time = now
+                    else:
+                        yield f"data: {payload}\n\n"
+                except (BrokenPipeError, OSError, GeneratorExit) as e:
+                    if isinstance(e, GeneratorExit):
+                        got_generator_exit = True
+                    break
+
+        except FileNotFoundError as e:
+            if not closed_event.is_set():
+                try:
+                    payload = json.dumps({'type': 'ansi', 'content': f"\x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m"})
+                    yield f"data: {payload}\n\n"
+                except Exception:
+                    pass
+        except Exception as e:
+            if not closed_event.is_set():
+                try:
+                    payload = json.dumps({'type': 'ansi', 'content': f"[SYSTEM ERROR] {str(e)}"})
+                    yield f"data: {payload}\n\n"
+                except Exception:
+                    pass
+        finally:
+            if process:
+                process.stdout.close()
+                kill_process_tree(process)
+            with processes_lock:
+                if user in active_processes:
+                    del active_processes[user]
+                    logging.info(f"Removed process entry for {user}")
+
+            if not got_generator_exit:
+                try:
+                    ended_msg = json.dumps({'type': 'ansi', 'content': "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"})
+                    tip_msg = json.dumps({'type': 'ansi', 'content': "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"})
+                    yield f"data: {ended_msg}\n\n"
+                    yield f"data: {tip_msg}\n\n"
+                    yield "data: CLOSE\n\n"
+                except GeneratorExit:
+                    pass
+                except Exception:
+                    pass
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.call_on_close(closed_event.set)
+    return response
+
+@app.route("/")
+def home():
+    return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
+
+def kill_process_tree(proc):
+    """Kill a process and all its children. Falls back to simple kill if psutil missing."""
+    if proc.poll() is not None:
+        logging.debug(f"Process {proc.pid} already dead")
+        return
+    if PSUTIL_AVAILABLE:
+        try:
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            parent.kill()
+            logging.info(f"Killed process tree for PID {proc.pid}")
+        except psutil.NoSuchProcess:
+            logging.debug(f"Process {proc.pid} already gone")
     else:
-        print(f"✅ pip already installed: {pip_check.stdout.strip()}")
-    if not install_base_packages():
-        sys.exit(1)
-    method = ensure_portablemc()
-    if not method:
-        sys.exit(1)
-    print("✅ Setup complete. Launching portablemc.py...")
-    launch_launcher(method)
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logging.info(f"Terminated process PID {proc.pid} (psutil unavailable)")
+
+def graceful_shutdown(sig, frame):
+    logging.info("SHUTTING DOWN CORE...")
+    with processes_lock:
+        for user, proc in list(active_processes.items()):
+            kill_process_tree(proc)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, graceful_shutdown)
 
 if __name__ == "__main__":
-    main()
+    try:
+        socketio.run(app, port=5000, debug=False, allow_unsafe_werkzeug=True)
+    except KeyboardInterrupt:
+        graceful_shutdown(None, None)
