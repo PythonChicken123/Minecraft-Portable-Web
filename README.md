@@ -4,5 +4,6 @@ In early development
 
 ![Preview](static/preview.jpg)
 
-Looking forward to bypass group policy, send a pull request to contribute.
+Looking forward to bypass group policy, send a pull request to contribute:
+
 `OSError: [WinError 1260] This program is blocked by group policy. For more information, contact your system administrator`
