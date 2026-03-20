@@ -2,6 +2,14 @@ A Python Script that you can use to launch minecraft via a web browser using Fla
 
 In early development.
 
+Using:
+* C# Code compilation
+* EXE Code compilation
+* Powershell Script Code as fallback
+* VBS Script as fallback
+
+![Preview](static/preview.jpg)
+
 Execution steps:
 1. Clone this repository
 ```cli
@@ -19,14 +27,6 @@ cd Minecraft-Portable-Web
 ```cli
 python main.py
 ```
-
-Using:
-* C# Code compilation
-* EXE Code compilation
-* Powershell Script Code as fallback
-* VBS Script as fallback
-
-![Preview](static/preview.jpg)
 
 *An attempt to bypass group policy with potentional fallbacks*
 
