@@ -31,41 +31,39 @@ exePath = fso.BuildPath(binDir, "portablemc.exe")
 
 ' --- Download function with SSL fallback ---
 Function DownloadFile(url, destPath)
+    Dim allowInsecure
+    allowInsecure = (UCase(Environment("ALLOW_INSECURE_SSL")) = "TRUE")
     On Error Resume Next
     Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
     http.Open "GET", url, False
-    http.SetTimeouts 10000, 10000, 10000, 10000
     http.Send
     If Err.Number = 0 And http.Status = 200 Then
-        Dim binaryData
-        binaryData = http.ResponseBody
-        Set stream = CreateObject("ADODB.Stream")
-        stream.Type = 1
-        stream.Open
-        stream.Write binaryData
-        stream.SaveToFile destPath, 2
-        stream.Close
-        DownloadFile = True
-        Exit Function
-    End If
-    ' Fallback to XMLHTTP with SSL ignore
-    Set xmlHttp = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-    xmlHttp.setOption 2, 13056
-    xmlHttp.Open "GET", url, False
-    xmlHttp.Send
-    If Err.Number = 0 And xmlHttp.Status = 200 Then
-        Set stream = CreateObject("ADODB.Stream")
-        stream.Type = 1
-        stream.Open
-        stream.Write xmlHttp.ResponseBody
-        stream.SaveToFile destPath, 2
-        stream.Close
-        DownloadFile = True
+        ' Success – write file
     Else
-        WScript.Echo "Download failed: " & Err.Description
-        DownloadFile = False
+        If allowInsecure Then
+            Err.Clear
+            Set http = CreateObject("MSXML2.ServerXMLHTTP")
+            http.Open "GET", url, False
+            http.setOption 2, 13056   ' ignore certificate errors
+            http.Send
+            If Err.Number = 0 And http.Status = 200 Then
+                ' Success with insecure fallback
+            Else
+                Exit Function
+            End If
+        Else
+            Exit Function
+        End If
     End If
-    On Error Goto 0
+    ' Write the response body to file
+    Dim stream
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 1
+    stream.Open
+    stream.Write http.ResponseBody
+    stream.SaveToFile destPath, 2
+    stream.Close
+    DownloadFile = True
 End Function
 
 Sub ExtractZip(zipPath, destDir)

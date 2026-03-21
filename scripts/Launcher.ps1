@@ -90,7 +90,7 @@ if ($process.HasExited) {
     Remove-Item $tempOut, $tempErr -Force -ErrorAction SilentlyContinue
     exit $process.ExitCode
 } else {
-    Write-Host "Process still running after $timeout seconds – detaching."
+    Write-Host "Process still running after $timeout seconds - detaching."
     Remove-Item $tempOut, $tempErr -Force -ErrorAction SilentlyContinue
     exit 0
 }
