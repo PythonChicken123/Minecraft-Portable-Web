@@ -443,7 +443,7 @@ def get_system_python():
             result = subprocess.run([str(current), "--version"], capture_output=True, text=True, timeout=2)
             if result.returncode == 0 and "Python 3" in result.stdout:
                 candidates.append(current)
-        except:
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
             pass
 
     # From registry (both HKCU and HKLM)
@@ -464,19 +464,16 @@ def get_system_python():
                 break
         winreg.CloseKey(key)
 
-    # Also check common locations (including all versions from 3.9 to 3.14)
+    # Common install locations
     versions = ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]
     common_paths = []
     for ver in versions:
-        # Standard install locations
         common_paths.append(f"C:\\Python{ver.replace('.', '')}\\python.exe")
         common_paths.append(f"C:\\Users\\{os.environ.get('USERNAME')}\\AppData\\Local\\Programs\\Python\\Python{ver.replace('.', '')}\\python.exe")
         common_paths.append(f"C:\\Program Files\\Python{ver.replace('.', '')}\\python.exe")
         common_paths.append(f"C:\\Program Files (x86)\\Python{ver.replace('.', '')}\\python.exe")
-    # Add Sysnative and System32 for potential 64-bit Python from WOW64
     common_paths.append(r"C:\Windows\Sysnative\python.exe")
     common_paths.append(r"C:\Windows\System32\python.exe")
-
     for p in common_paths:
         candidates.append(Path(p))
 
@@ -485,7 +482,7 @@ def get_system_python():
         candidates.append(Path(dir) / "python.exe")
         candidates.append(Path(dir) / "python3.exe")
 
-    # Remove duplicates and check existence and version
+    # Remove duplicates and check version
     seen = set()
     valid = []
     for p in candidates:
@@ -496,7 +493,7 @@ def get_system_python():
                 if result.returncode == 0 and "Python 3" in result.stdout:
                     version_str = result.stdout.strip().split()[1]  # e.g., "3.11.5"
                     valid.append((version_str, p))
-            except:
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
                 pass
 
     if not valid:
