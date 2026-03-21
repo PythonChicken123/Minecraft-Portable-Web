@@ -8,17 +8,22 @@ class Program
 {
     static void Main(string[] args)
     {
+        // Force TLS 1.2 to avoid SSL issues
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
+
         if (args.Length < 3)
         {
             Console.WriteLine("Usage: PortableMCLoader.exe Username ServerIp JvmOpts");
             Environment.Exit(1);
         }
+
         string username = args[0];
         string serverIp = args[1];
         string jvmOpts = args[2];
 
         string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PortableMC");
         Directory.CreateDirectory(baseDir);
+
         string binDir = Path.Combine(baseDir, "portablemc_bin");
         string exePath = Path.Combine(binDir, "portablemc.exe");
 
@@ -27,52 +32,33 @@ class Program
             Console.WriteLine("portablemc.exe not found. Downloading...");
             string url = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/portablemc-5.0.2-windows-x86_64-msvc.zip";
             string zipPath = Path.Combine(baseDir, "portablemc.zip");
-            try
+
+            if (!DownloadFile(url, zipPath))
             {
-                using (WebClient client = new WebClient())
-                {
-                    client.DownloadFile(url, zipPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Download failed: " + ex.Message);
-                Console.WriteLine("Retrying with SSL disabled...");
-                try
-                {
-                    ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => true;
-                    using (WebClient client = new WebClient())
-                    {
-                        client.DownloadFile(url, zipPath);
-                    }
-                }
-                catch (Exception ex2)
-                {
-                    Console.WriteLine("Download failed even with SSL disabled: " + ex2.Message);
-                    Environment.Exit(1);
-                }
+                Environment.Exit(1);
             }
 
             Console.WriteLine("Extracting...");
-            ZipFile.ExtractToDirectory(zipPath, binDir);
-            File.Delete(zipPath);
-            foreach (string dir in Directory.GetDirectories(binDir))
+            try
             {
-                foreach (string file in Directory.GetFiles(dir))
-                {
-                    string dest = Path.Combine(binDir, Path.GetFileName(file));
-                    if (File.Exists(dest)) File.Delete(dest);
-                    File.Move(file, dest);
-                }
-                Directory.Delete(dir, true);
+                ZipFile.ExtractToDirectory(zipPath, binDir);
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Extraction failed: " + ex.Message);
+                Environment.Exit(1);
+            }
+            finally
+            {
+                File.Delete(zipPath);
+            }
+
+            // Flatten subdirectories
+            FlattenDirectory(binDir);
             Console.WriteLine("Extraction complete.");
         }
 
-        string scriptDir = Directory.GetCurrentDirectory();
-        CreateJunction(Path.Combine(scriptDir, "mods"), Path.Combine(baseDir, "mods"));
-        CreateJunction(Path.Combine(scriptDir, "resourcepacks"), Path.Combine(baseDir, "resourcepacks"));
-
+        // Build command line
         string jvmArgs = jvmOpts.Replace(' ', ',');
         string arguments = string.Format("--main-dir . start --join-server {0} --jvm-arg={1} fabric: -u {2}",
             serverIp, jvmArgs, username);
@@ -80,8 +66,10 @@ class Program
         Console.WriteLine(string.Format("Launching: {0} {1}", exePath, arguments));
         Console.WriteLine(string.Format("Working directory: {0}", baseDir));
 
+        // Set environment variable to avoid elevation prompts
         Environment.SetEnvironmentVariable("__COMPAT_LAYER", "RUNASINVOKER");
 
+        // Start Minecraft with hidden console
         ProcessStartInfo psi = new ProcessStartInfo
         {
             FileName = exePath,
@@ -113,23 +101,50 @@ class Program
         }
     }
 
-    static void CreateJunction(string source, string target)
+    static bool DownloadFile(string url, string destPath)
     {
-        if (!Directory.Exists(source))
-            Directory.CreateDirectory(source);
-
-        if (Directory.Exists(target))
+        try
         {
-            Directory.Delete(target, true);
-            Console.WriteLine(string.Format("Removed existing target: {0}", target));
+            Console.WriteLine(string.Format("Downloading {0} -> {1}", url, destPath));
+            using (WebClient client = new WebClient())
+            {
+                client.DownloadFile(url, destPath);
+            }
+            return true;
         }
+        catch (Exception ex)
+        {
+            Console.WriteLine(string.Format("First download attempt failed: {0}", ex.Message));
+            Console.WriteLine("Retrying with SSL verification disabled...");
+            try
+            {
+                ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                using (WebClient client = new WebClient())
+                {
+                    client.DownloadFile(url, destPath);
+                }
+                return true;
+            }
+            catch (Exception ex2)
+            {
+                Console.WriteLine(string.Format("Download failed even with SSL disabled: {0}", ex2.Message));
+                return false;
+            }
+        }
+    }
 
-        Console.WriteLine(string.Format("Creating junction: {0} -> {1}", target, source));
-        Process.Start("cmd", string.Format("/c mklink /J \"{0}\" \"{1}\"", target, source)).WaitForExit();
-
-        if (Directory.Exists(target))
-            Console.WriteLine("Junction created successfully.");
-        else
-            Console.WriteLine("Failed to create junction.");
+    static void FlattenDirectory(string dir)
+    {
+        if (!Directory.Exists(dir)) return;
+        foreach (string subDir in Directory.GetDirectories(dir))
+        {
+            foreach (string file in Directory.GetFiles(subDir))
+            {
+                string dest = Path.Combine(dir, Path.GetFileName(file));
+                if (File.Exists(dest)) File.Delete(dest);
+                File.Move(file, dest);
+            }
+            Directory.Delete(subDir, true);
+        }
     }
 }

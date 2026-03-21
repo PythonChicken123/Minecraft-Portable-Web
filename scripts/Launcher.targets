@@ -5,13 +5,15 @@
       <CsFile>$(TempDir)\PortableMCLoader.cs</CsFile>
       <ExeFile>$(TempDir)\PortableMCLoader.exe</ExeFile>
       <CsSource>$(MSBuildProjectDirectory)\PortableMCLoader.cs</CsSource>
+      <Success>false</Success>
     </PropertyGroup>
 
-    <!-- C# compilation (only if source exists) -->
+    <!-- 1. Copy source if exists -->
     <Copy Condition="Exists('$(CsSource)')"
           SourceFiles="$(CsSource)"
           DestinationFolder="$(TempDir)" />
 
+    <!-- 2. Compile and run if source exists -->
     <Exec Condition="Exists('$(CsFile)')"
           Command="&quot;$(MSBuildToolsPath)\csc.exe&quot; /target:exe /out:&quot;$(ExeFile)&quot; /reference:System.IO.Compression.FileSystem.dll &quot;$(CsFile)&quot;"
           ContinueOnError="true">
@@ -24,21 +26,33 @@
       <Output TaskParameter="ExitCode" PropertyName="ExeExitCode"/>
     </Exec>
 
-    <!-- VBScript fallback -->
-    <Exec Condition="!Exists('$(CsFile)') Or $(CscExitCode) != 0 Or $(ExeExitCode) != 0"
+    <PropertyGroup Condition="Exists('$(CsFile)') And $(CscExitCode) == 0 And $(ExeExitCode) == 0">
+      <Success>true</Success>
+    </PropertyGroup>
+
+    <!-- 3. VBScript fallback -->
+    <Exec Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs')"
           Command="cscript //nologo &quot;$(MSBuildProjectDirectory)\Launcher.vbs&quot; &quot;$(Username)&quot; &quot;$(ServerIp)&quot; &quot;$(JvmOpts)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="VbsExitCode"/>
     </Exec>
 
-    <!-- PowerShell fallback -->
-    <Exec Condition="$(VbsExitCode) != 0"
+    <PropertyGroup Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs') And $(VbsExitCode) == 0">
+      <Success>true</Success>
+    </PropertyGroup>
+
+    <!-- 4. PowerShell fallback -->
+    <Exec Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1')"
           Command="powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;$(MSBuildProjectDirectory)\Launcher.ps1&quot; -Username &quot;$(Username)&quot; -ServerIp &quot;$(ServerIp)&quot; -JvmOpts &quot;$(JvmOpts)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="PsExitCode"/>
     </Exec>
 
-    <Error Condition="( (!Exists('$(CsFile)') Or $(CscExitCode) != 0 Or $(ExeExitCode) != 0) And $(VbsExitCode) != 0 And $(PsExitCode) != 0 )"
-           Text="All launch methods failed. Check system policy and permissions." />
+    <PropertyGroup Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1') And $(PsExitCode) == 0">
+      <Success>true</Success>
+    </PropertyGroup>
+
+    <!-- Final error if all failed -->
+    <Error Condition="!$(Success)" Text="All launch methods failed. Check system policy and permissions." />
   </Target>
 </Project>
