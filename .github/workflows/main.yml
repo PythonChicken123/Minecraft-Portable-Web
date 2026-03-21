@@ -38,9 +38,12 @@ jobs:
 
       - name: Commit and push if changed
         if: steps.git-check.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
           git add .
           git commit -m "Apply automatic ruff fixes and formatting [skip ci]"
           git push
@@ -78,5 +81,5 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '⚠️ **Ruff auto-fix applied**\n\nLinting and formatting changes were automatically applied. Please pull the latest changes or update your branch.'
+              body: '⚠️ **Ruff auto-fix applied (changes detected)**\n\nLinting and formatting changes were found. Please run `ruff check --fix . && ruff format .` locally and push the changes, or let the push job handle it on the next commit.'
             })
