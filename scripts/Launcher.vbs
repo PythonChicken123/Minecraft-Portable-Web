@@ -31,39 +31,53 @@ exePath = fso.BuildPath(binDir, "portablemc.exe")
 
 ' --- Download function with SSL fallback ---
 Function DownloadFile(url, destPath)
-    Dim allowInsecure
-    allowInsecure = (UCase(Environment("ALLOW_INSECURE_SSL")) = "TRUE")
+    ' Get the environment variable via WScript.Shell
+    Dim shell, allowInsecure
+    Set shell = CreateObject("WScript.Shell")
+    allowInsecure = LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "true" Or _
+                    LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "1" Or _
+                    LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "yes"
+
     On Error Resume Next
     Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
     http.Open "GET", url, False
+    http.SetTimeouts 10000, 10000, 10000, 10000
     http.Send
     If Err.Number = 0 And http.Status = 200 Then
-        ' Success – write file
-    Else
-        If allowInsecure Then
-            Err.Clear
-            Set http = CreateObject("MSXML2.ServerXMLHTTP")
-            http.Open "GET", url, False
-            http.setOption 2, 13056   ' ignore certificate errors
-            http.Send
-            If Err.Number = 0 And http.Status = 200 Then
-                ' Success with insecure fallback
-            Else
-                Exit Function
-            End If
-        Else
-            Exit Function
-        End If
+        Dim binaryData
+        binaryData = http.ResponseBody
+        Set stream = CreateObject("ADODB.Stream")
+        stream.Type = 1
+        stream.Open
+        stream.Write binaryData
+        stream.SaveToFile destPath, 2
+        stream.Close
+        DownloadFile = True
+        Exit Function
     End If
-    ' Write the response body to file
-    Dim stream
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 1
-    stream.Open
-    stream.Write http.ResponseBody
-    stream.SaveToFile destPath, 2
-    stream.Close
-    DownloadFile = True
+
+    ' Only attempt insecure fallback if allowed
+    If allowInsecure Then
+        Err.Clear
+        Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+        http.setOption 2, 13056   ' ignore certificate errors
+        http.Open "GET", url, False
+        http.Send
+        If Err.Number = 0 And http.Status = 200 Then
+            Set stream = CreateObject("ADODB.Stream")
+            stream.Type = 1
+            stream.Open
+            stream.Write http.ResponseBody
+            stream.SaveToFile destPath, 2
+            stream.Close
+            DownloadFile = True
+        Else
+            DownloadFile = False
+        End If
+    Else
+        DownloadFile = False
+    End If
+    On Error Goto 0
 End Function
 
 Sub ExtractZip(zipPath, destDir)

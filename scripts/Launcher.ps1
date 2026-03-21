@@ -1,10 +1,11 @@
-$env:__COMPAT_LAYER = "RUNASINVOKER"
-
 param(
     [string]$Username,
     [string]$ServerIp,
     [string]$JvmOpts
 )
+
+# Set compatibility layer to avoid UAC prompts
+$env:__COMPAT_LAYER = "RUNASINVOKER"
 
 # Fallback to positional arguments if needed
 if (-not $JvmOpts -and $args.Count -gt 0) {
@@ -31,25 +32,35 @@ if (-not (Test-Path $baseDir)) {
     New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
 }
 
-# --- Download portablemc.exe if missing (with SSL fallback) ---
+# --- Download portablemc.exe if missing (with optional SSL fallback) ---
 if (-not (Test-Path $exePath)) {
     Write-Host "portablemc.exe not found. Downloading to $binDir..."
     $url = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/portablemc-5.0.2-windows-x86_64-msvc.zip"
     $zipPath = Join-Path $baseDir "portablemc.zip"
+
+    # Check if insecure SSL is allowed
+    $allowInsecure = $env:ALLOW_INSECURE_SSL -in @("true", "1", "yes")
+
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
     } catch {
         Write-Host "First download attempt failed: $_"
-        Write-Host "Retrying with SSL verification disabled..."
-        try {
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
-            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-        } catch {
-            Write-Host "Download failed. Exiting."
+        if ($allowInsecure) {
+            Write-Host "Retrying with SSL verification disabled..."
+            try {
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+                Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+            } catch {
+                Write-Host "Download failed even with SSL disabled. Exiting."
+                exit 1
+            }
+        } else {
+            Write-Host "SSL verification failed and insecure SSL is disabled. Exiting."
             exit 1
         }
     }
+
     Write-Host "Extracting..."
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $binDir)
@@ -69,8 +80,10 @@ $arguments = "--main-dir . start --join-server $ServerIp --jvm-arg=$jvmArgs fabr
 Write-Host "Launching: $exePath $arguments"
 Write-Host "Working directory: $baseDir"
 
+# Ensure the environment variable is set for the child process
 $env:__COMPAT_LAYER = "RUNASINVOKER"
 
+# Launch Minecraft with output redirection
 $tempOut = Join-Path $env:TEMP "portablemc_out.txt"
 $tempErr = Join-Path $env:TEMP "portablemc_err.txt"
 $process = Start-Process -FilePath $exePath -ArgumentList $arguments -WorkingDirectory $baseDir -NoNewWindow -PassThru -RedirectStandardOutput $tempOut -RedirectStandardError $tempErr

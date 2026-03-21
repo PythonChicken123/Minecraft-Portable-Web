@@ -100,7 +100,7 @@ class Program
     {
         // Manual check for environment variable (C# 5 compatible)
         string envVar = Environment.GetEnvironmentVariable("ALLOW_INSECURE_SSL");
-        bool allowInsecure = envVar != null && envVar.ToLower() == "true";
+        bool allowInsecure = envVar != null && (envVar.ToLower() == "true" || envVar == "1" || envVar.ToLower() == "yes");
 
         try
         {
