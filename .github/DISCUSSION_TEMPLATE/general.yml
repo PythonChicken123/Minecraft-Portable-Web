@@ -1,0 +1,14 @@
+title: "[General] "
+labels: ["discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start a discussion about the project. This can be about usage, development, or anything else.
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic / Question
+      placeholder: What would you like to discuss?
+    validations:
+      required: true
