@@ -54,24 +54,24 @@ Then choose a method:
 ## How It Works (Bypass Chain)
 The launcher tries the most reliable method first, falling back if blocked:
 
-1. Embedded Python + portablemc (if the system allows Python execution).
-2. MSBuild + C# compilation (uses `csc.exe` to compile a tiny loader).
-3. PowerShell (with `-ExecutionPolicy Bypass`).
-4. VBScript (via `cscript`).
+1. **Embedded Python + portablemc** (if the system allows Python execution).
+2. **MSBuild + C# compilation** (uses `csc.exe` to compile a tiny loader).
+3. **PowerShell** (with `-ExecutionPolicy Bypass`).
+4. **VBScript** (via `cscript`).
 
 If all fail, the script reports an error.
 
 All downloaded files (embedded Python, portablemc binary) are stored in `%LOCALAPPDATA%\PortableMC`. Junctions are created for `mods` and `resourcepacks` so that files placed in the project folder appear inside the game.
 
 ## Development
-* Linting: Ruff is used – run `ruff check .` and `ruff format .` before committing.
-* Workflow: The GitHub Actions workflow (`.github/workflows/main.yml`) automatically applies Ruff fixes on push/pull requests.
+* **Linting:** Ruff is used – run `ruff check .` and `ruff format .` before committing.
+* **Workflow:** The GitHub Actions workflow (`.github/workflows/main.yml`) automatically applies Ruff fixes on push/pull requests.
 
 ## Troubleshooting
-* OSError: `[WinError 1260]` – Group policy blocks the method you chose. Try another option.
-* PowerShell / VBScript errors – Ensure the scripts have proper permissions. The launcher sets `__COMPAT_LAYER=RUNASINVOKER` to avoid UAC prompts.
-* SSL errors – The C# loader and Python scripts force TLS 1.2 and fall back to disabling certificate validation.
-* Junction creation fails – The launcher falls back to creating regular directories.
+* `OSError: [WinError 1260]` – Group policy blocks the method you chose. Try another option.
+* **PowerShell / VBScript errors** – Ensure the scripts have proper permissions. The launcher sets `__COMPAT_LAYER=RUNASINVOKER` to avoid UAC prompts.
+* **SSL errors** – The C# loader and Python scripts force TLS 1.2 and fall back to disabling certificate validation.
+* **Junction creation fails** – The launcher falls back to creating regular directories.
 
 ## License
 MIT
@@ -80,3 +80,4 @@ MIT
 * [PortableMC](https://github.com/mindstorm38/portablemc) – The Heart of The Launcher
 * [Flask](https://flask.palletsprojects.com/) & [Flask‑SocketIO](https://flask-socketio.readthedocs.io/) – Web Interface
 * [ansi2html](https://github.com/ralphbean/ansi2html) & [ansi_up](https://github.com/drudru/ansi_up) – ANSI colour conversion
+* [Socket.io](https://socket.io) - Communication across Web and Flask Interface
