@@ -11,7 +11,7 @@ body:
     attributes:
       label: Is your feature request related to a problem?
       description: A clear description of what the problem is.
-      placeholder: I'm always frustrated when...
+      placeholder: A nice feature would be...
   - type: textarea
     id: solution
     attributes:
