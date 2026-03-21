@@ -39,9 +39,9 @@ Minecraft-Portable-Web/
 - (Optional) VBScript support – used as a final fallback.
 
 ## TL;DR
-* Test in Windows Sandbox
-* Test on bypassing group policy
-* Sourcery Security fixes
+* Test in **Windows Sandbox**
+* Test on a **Restricted Environment** by **Group Policy**
+* Sourcery **Security fixes**
 
 ## Getting Started
 
@@ -77,6 +77,9 @@ All downloaded files (embedded Python, portablemc binary) are stored in `%LOCALA
 * **PowerShell / VBScript errors** – Ensure the scripts have proper permissions. The launcher sets `__COMPAT_LAYER=RUNASINVOKER` to avoid UAC prompts.
 * **SSL errors** – The C# loader and Python scripts force TLS 1.2 and fall back to disabling certificate validation.
 * **Junction creation fails** – The launcher falls back to creating regular directories.
+
+## Found a bug? / Have a suggestion?
+If you encounter any issues or have an idea to improve the launcher, please [open an issue](https://github.com/PythonChicken123/Minecraft-Portable-Web/issues) and use the appropriate template. We welcome contributions!
 
 ## License
 MIT
