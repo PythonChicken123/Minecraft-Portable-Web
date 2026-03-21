@@ -1,6 +1,6 @@
 # Minecraft Portable Web Launcher
 
-A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass group policy restrictions.
+A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass Group Policy restrictions.
 
 ![Preview](static/preview.jpg)
 
@@ -88,5 +88,5 @@ MIT
 * [PortableMC](https://github.com/mindstorm38/portablemc) – The Heart of The Launcher
 * [Flask](https://flask.palletsprojects.com/) & [Flask‑SocketIO](https://flask-socketio.readthedocs.io/) – Web Interface
 * [ansi2html](https://github.com/ralphbean/ansi2html) & [ansi_up](https://github.com/drudru/ansi_up) – ANSI colour conversion
-* [Socket.io](https://socket.io) - Communication across Web and Flask Interface
+* [Socket.io](https://socket.io) - Communication between the web and Flask interfaces
 * [Ruff Linter](https://github.com/astral-sh/ruff) - An extremely fast Python linter
