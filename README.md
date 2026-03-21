@@ -18,7 +18,7 @@ A Python‑based Minecraft launcher that runs in a browser using [Flask](https:/
 Minecraft-Portable-Web/
 ├── main.py # Entry point – menu & bootstrapping
 ├── portablemc.py # Web server (Flask + SocketIO)
-├── Scripts/ # Launcher helper scripts
+├── scripts/ # Launcher helper scripts
 │ ├── Launcher.targets # MSBuild task
 │ ├── PortableMCLoader.cs # C# loader (compiled if needed)
 │ ├── Launcher.vbs # VBScript fallback
@@ -41,7 +41,7 @@ Minecraft-Portable-Web/
 ## TL;DR
 * Test in **Windows Sandbox**
 * Test on a **Restricted Environment** by **Group Policy**
-* Sourcery **Security fixes**
+* Apply Sourcery **security fixes** as recommended below
 
 ## Getting Started
 
