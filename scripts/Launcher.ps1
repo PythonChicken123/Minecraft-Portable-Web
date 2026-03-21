@@ -7,7 +7,7 @@ param(
 )
 
 # Fallback to positional arguments if needed
-if (-not $JvmOpts -and $args.Count -ge 0) {
+if (-not $JvmOpts -and $args.Count -gt 0) {
     $JvmOpts = $args[0]
 }
 
@@ -25,31 +25,6 @@ $rootDir = Split-Path -Parent $scriptDir
 $baseDir = Join-Path $env:LOCALAPPDATA "PortableMC"
 $binDir = Join-Path $baseDir "portablemc_bin"
 $exePath = Join-Path $binDir "portablemc.exe"
-
-# --- Function to create a junction, removing any existing folder/link first ---
-function Ensure-Junction {
-    param(
-        [string]$Source,
-        [string]$Target
-    )
-    # Create source folder if it doesn't exist (so junction has a target)
-    if (-not (Test-Path $Source)) {
-        New-Item -ItemType Directory -Path $Source -Force | Out-Null
-        Write-Host "Created source folder: $Source"
-    }
-    # If target already exists, remove it (whether it's a folder or a junction)
-    if (Test-Path $Target) {
-        Remove-Item -Path $Target -Recurse -Force
-        Write-Host "Removed existing target: $Target"
-    }
-    Write-Host "Creating junction: $Target -> $Source"
-    cmd /c mklink /J "$Target" "$Source" 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Junction created successfully."
-    } else {
-        Write-Host "Failed to create junction. Ensure source exists and you're on the same drive."
-    }
-}
 
 # --- Ensure the base directory exists ---
 if (-not (Test-Path $baseDir)) {
@@ -86,10 +61,6 @@ if (-not (Test-Path $exePath)) {
         Remove-Item $_.FullName -Recurse
     }
 }
-
-# --- Create junctions for mods and resourcepacks (force recreation) ---
-Ensure-Junction -Source (Join-Path $rootDir "mods") -Target (Join-Path $baseDir "mods")
-Ensure-Junction -Source (Join-Path $rootDir "resourcepacks") -Target (Join-Path $baseDir "resourcepacks")
 
 # --- Process JVM options and launch ---
 $jvmArgs = $JvmOpts -replace ' ', ','

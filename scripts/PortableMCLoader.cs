@@ -8,7 +8,7 @@ class Program
 {
     static void Main(string[] args)
     {
-        // Force TLS 1.2 to avoid SSL issues
+        // Force TLS 1.2
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
 
         if (args.Length < 3)
@@ -23,7 +23,6 @@ class Program
 
         string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PortableMC");
         Directory.CreateDirectory(baseDir);
-
         string binDir = Path.Combine(baseDir, "portablemc_bin");
         string exePath = Path.Combine(binDir, "portablemc.exe");
 
@@ -45,7 +44,7 @@ class Program
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Extraction failed: " + ex.Message);
+                Console.WriteLine(string.Format("Extraction failed: {0}", ex.Message));
                 Environment.Exit(1);
             }
             finally
@@ -53,12 +52,10 @@ class Program
                 File.Delete(zipPath);
             }
 
-            // Flatten subdirectories
             FlattenDirectory(binDir);
             Console.WriteLine("Extraction complete.");
         }
 
-        // Build command line
         string jvmArgs = jvmOpts.Replace(' ', ',');
         string arguments = string.Format("--main-dir . start --join-server {0} --jvm-arg={1} fabric: -u {2}",
             serverIp, jvmArgs, username);
@@ -66,10 +63,8 @@ class Program
         Console.WriteLine(string.Format("Launching: {0} {1}", exePath, arguments));
         Console.WriteLine(string.Format("Working directory: {0}", baseDir));
 
-        // Set environment variable to avoid elevation prompts
         Environment.SetEnvironmentVariable("__COMPAT_LAYER", "RUNASINVOKER");
 
-        // Start Minecraft with hidden console
         ProcessStartInfo psi = new ProcessStartInfo
         {
             FileName = exePath,
@@ -103,6 +98,10 @@ class Program
 
     static bool DownloadFile(string url, string destPath)
     {
+        // Manual check for environment variable (C# 5 compatible)
+        string envVar = Environment.GetEnvironmentVariable("ALLOW_INSECURE_SSL");
+        bool allowInsecure = envVar != null && envVar.ToLower() == "true";
+
         try
         {
             Console.WriteLine(string.Format("Downloading {0} -> {1}", url, destPath));
@@ -115,19 +114,27 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine(string.Format("First download attempt failed: {0}", ex.Message));
-            Console.WriteLine("Retrying with SSL verification disabled...");
-            try
+            if (allowInsecure)
             {
-                ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => true;
-                using (WebClient client = new WebClient())
+                Console.WriteLine("Retrying with SSL verification disabled...");
+                try
                 {
-                    client.DownloadFile(url, destPath);
+                    ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => true;
+                    using (WebClient client = new WebClient())
+                    {
+                        client.DownloadFile(url, destPath);
+                    }
+                    return true;
                 }
-                return true;
+                catch (Exception ex2)
+                {
+                    Console.WriteLine(string.Format("Download failed even with SSL disabled: {0}", ex2.Message));
+                    return false;
+                }
             }
-            catch (Exception ex2)
+            else
             {
-                Console.WriteLine(string.Format("Download failed even with SSL disabled: {0}", ex2.Message));
+                Console.WriteLine("SSL verification failed and insecure SSL is disabled.");
                 return false;
             }
         }

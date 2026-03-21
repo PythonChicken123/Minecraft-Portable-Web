@@ -8,6 +8,7 @@ Run with any Python (e.g., system 3.11) to set up and launch the launcher.
 import os
 import sys
 import subprocess
+import stat
 import urllib.request
 import zipfile
 import tarfile
@@ -18,7 +19,7 @@ import winreg
 from pathlib import Path
 
 # --- Windows-only guard ---
-if platform.system().lower() != "windows":
+if platform.system().lower() != 'windows':
     print("❌ This bootstrap script currently only supports Windows.")
     sys.exit(1)
 
@@ -29,10 +30,12 @@ BASE_DIR = APPDATA / "PortableMC"
 EMBEDDED_DIR = BASE_DIR / "python"
 EMBEDDED_PYTHON = EMBEDDED_DIR / "python.exe"
 PYTHON_VERSION = "3.14.3"
+PYTHON_VERSIONS = ["3.15", "3.14", "3.13", "3.12", "3.11"]
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]
+BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]   
 PORTABLEMC_BIN_DIR = BASE_DIR / "portablemc_bin"
+ALLOW_INSECURE_SSL = os.environ.get("ALLOW_INSECURE_SSL", "").lower() in ("1", "true", "yes")
 
 # Default game settings
 DEFAULT_USERNAME = "CubeUniform840"
@@ -56,22 +59,21 @@ SYSTEM = platform.system().lower()
 MACHINE = platform.machine().lower()
 
 ARCH_MAP = {
-    "x86_64": "x86_64",
-    "amd64": "x86_64",
-    "i686": "i686",
-    "i386": "i686",
-    "aarch64": "aarch64",
-    "arm64": "aarch64",
-    "armv7l": "arm-gnueabihf",
-    "arm": "arm-gnueabihf",
+    'x86_64': 'x86_64',
+    'amd64': 'x86_64',
+    'i686': 'i686',
+    'i386': 'i686',
+    'aarch64': 'aarch64',
+    'arm64': 'aarch64',
+    'armv7l': 'arm-gnueabihf',
+    'arm': 'arm-gnueabihf',
 }
 
 OS_MAP = {
-    "windows": "windows",
-    "linux": "linux",
-    "darwin": "macos",
+    'windows': 'windows',
+    'linux': 'linux',
+    'darwin': 'macos',
 }
-
 
 def get_portablemc_url():
     """Return the download URL for the native portablemc binary, or None."""
@@ -79,20 +81,19 @@ def get_portablemc_url():
     if not os_name:
         print(f"⚠️ Unsupported OS: {SYSTEM}")
         return None
-    arch = ARCH_MAP.get(MACHINE, "x86_64")
-    if os_name == "macos":
-        arch = "aarch64" if arch == "aarch64" else "x86_64"
-    if os_name == "linux" and arch not in ("arm-gnueabihf",):
-        arch += "-gnu"
+    arch = ARCH_MAP.get(MACHINE, 'x86_64')
+    if os_name == 'macos':
+        arch = 'aarch64' if arch == 'aarch64' else 'x86_64'
+    if os_name == 'linux' and arch not in ('arm-gnueabihf',):
+        arch += '-gnu'
     base = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/"
-    if os_name == "windows":
+    if os_name == 'windows':
         ext = "zip"
         filename = f"portablemc-5.0.2-{os_name}-{arch}-msvc.{ext}"
     else:
         ext = "tar.gz"
         filename = f"portablemc-5.0.2-{os_name}-{arch}.{ext}"
     return base + filename
-
 
 # --- Data functions ---
 def prepare_user_data():
@@ -125,8 +126,15 @@ def prepare_user_data():
         elif dst.exists():
             print(f"ℹ️ {filename} already exists in %LOCALAPPDATA%\\PortableMC")
 
-
 # --- Junction functions ---
+def is_junction(path):
+    """Return True if path is a junction (reparse point)."""
+    try:
+        attrs = os.lstat(str(path))
+        return (attrs.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    except OSError:
+        return False
+
 def create_junction(source, target):
     """
     Create a junction from source to target.
@@ -141,20 +149,13 @@ def create_junction(source, target):
 
     # Remove existing target if it exists
     if target_path.exists():
-        if target_path.is_symlink():
-            # This is a junction (or a symlink) – remove only the junction itself
-            try:
-                os.rmdir(str(target_path))  # works for junctions
-                print(f"Removed existing junction: {target_path}")
-            except Exception as e:
-                print(f"Warning: Could not remove junction {target_path}: {e}")
+        if is_junction(target_path):
+            os.rmdir(str(target_path))  # removes only the junction
+            print(f"Removed existing junction: {target_path}")
         elif target_path.is_dir():
-            # Regular directory – delete its contents but not the source folder
-            if target_path == source_path:
-                print(f"Target {target_path} is the same as source; skipping removal.")
-            else:
-                shutil.rmtree(str(target_path), ignore_errors=True)
-                print(f"Removed existing directory: {target_path}")
+            # Regular directory – delete contents
+            shutil.rmtree(str(target_path), ignore_errors=True)
+            print(f"Removed existing directory: {target_path}")
         else:
             target_path.unlink()
 
@@ -162,19 +163,14 @@ def create_junction(source, target):
     try:
         subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(target_path), str(source_path)],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True
         )
         print(f"✅ Junction created: {target_path} -> {source_path}")
         return True
     except subprocess.CalledProcessError as e:
-        print(
-            f"⚠️ Could not create junction (falling back to regular directory): {e.stderr}"
-        )
+        print(f"⚠️ Could not create junction (falling back to regular directory): {e.stderr}")
         target_path.mkdir(parents=True, exist_ok=True)
         return False
-
 
 def ensure_junctions():
     r"""Ensure mods and resourcepacks directories exist in %LOCALAPPDATA%\PortableMC."""
@@ -184,6 +180,13 @@ def ensure_junctions():
     create_junction(ROOT_DIR / "mods", base_dir / "mods")
     create_junction(ROOT_DIR / "resourcepacks", base_dir / "resourcepacks")
 
+# --- Download functions ---
+def get_ssl_context():
+    """Return an unverified SSL context if ALLOW_INSECURE_SSL is True, else None."""
+    if ALLOW_INSECURE_SSL:
+        print("⚠️ WARNING: SSL certificate verification is disabled (ALLOW_INSECURE_SSL=true).")
+        return ssl._create_unverified_context()
+    return None
 
 # --- Helper functions ---
 def ensure_embedded_python():
@@ -199,14 +202,18 @@ def ensure_embedded_python():
         urllib.request.urlretrieve(PYTHON_URL, zip_path)
     except Exception as e:
         print(f"⚠️ First download attempt failed: {e}")
-        print("📥 Retrying with SSL verification disabled (insecure)...")
-        try:
-            ssl_context = ssl._create_unverified_context()
-            with urllib.request.urlopen(PYTHON_URL, context=ssl_context) as response:
-                with open(zip_path, "wb") as out_file:
-                    out_file.write(response.read())
-        except Exception as e2:
-            print(f"❌ Failed to download Python even with unverified SSL: {e2}")
+        if ALLOW_INSECURE_SSL:
+            print("📥 Retrying with SSL verification disabled...")
+            try:
+                context = get_ssl_context()
+                with urllib.request.urlopen(PYTHON_URL, context=context) as response:
+                    with open(zip_path, 'wb') as out_file:
+                        out_file.write(response.read())
+            except Exception as e2:
+                print(f"❌ Failed to download Python even with unverified SSL: {e2}")
+                return False
+        else:
+            print("❌ Download failed and insecure SSL is disabled.")
             return False
 
     print("📦 Extracting...")
@@ -215,7 +222,6 @@ def ensure_embedded_python():
     zip_path.unlink()
     print("✅ Embedded Python ready.")
     return True
-
 
 def fix_pth_file():
     """Enable site-packages in embedded Python's ._pth file."""
@@ -235,16 +241,11 @@ def fix_pth_file():
         print("ℹ️ site-packages already enabled.")
     return True
 
-
 def test_embedded_python():
     """Test if the embedded Python executable can be run."""
     try:
-        result = subprocess.run(
-            [str(EMBEDDED_PYTHON), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        result = subprocess.run([str(EMBEDDED_PYTHON), "--version"],
+                                capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             print(f"✅ Embedded Python runs: {result.stdout.strip()}")
             return True
@@ -258,11 +259,8 @@ def test_embedded_python():
         print(f"❌ Embedded Python test error: {e}")
         return False
 
-
-def download_get_pip(python_exe=None):
+def download_get_pip():
     """Download get-pip.py into the embedded Python directory."""
-    if python_exe is None:
-        python_exe = EMBEDDED_PYTHON
     pip_script = EMBEDDED_DIR / "get-pip.py"
     if pip_script.exists():
         print("✅ get-pip.py already present.")
@@ -270,16 +268,15 @@ def download_get_pip(python_exe=None):
 
     print("📥 Downloading get-pip.py (ignoring SSL cert for this request)...")
     try:
-        ssl_context = ssl._create_unverified_context()
-        with urllib.request.urlopen(GET_PIP_URL, context=ssl_context) as response:
-            with open(pip_script, "wb") as out_file:
+        context = get_ssl_context()  # from earlier (secure or insecure)
+        with urllib.request.urlopen(GET_PIP_URL, context=context) as response:
+            with open(pip_script, 'wb') as out_file:
                 out_file.write(response.read())
         print("✅ get-pip.py downloaded successfully.")
     except Exception as e:
         print(f"❌ Failed to download get-pip.py: {e}")
         return None
     return pip_script
-
 
 def run_pip_command(args, isolated=True, python_exe=None):
     """Run a pip command with the given Python executable."""
@@ -298,23 +295,20 @@ def run_pip_command(args, isolated=True, python_exe=None):
     print(result.stdout)
     return True
 
-
 def install_pip(python_exe=None):
-    """Install pip into the embedded Python environment."""
+    """Install pip into the given Python environment."""
     if python_exe is None:
         python_exe = EMBEDDED_PYTHON
-    pip_script = download_get_pip(python_exe)
+    pip_script = download_get_pip()
     if not pip_script:
         return False
+
     env = os.environ.copy()
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = ""
-    cmd = [
-        str(python_exe),
-        str(pip_script),
-        "--trusted-host=files.pythonhosted.org",
-        "--trusted-host=pypi.org",
-    ]
+    cmd = [str(python_exe), str(pip_script),
+           "--trusted-host=files.pythonhosted.org",
+           "--trusted-host=pypi.org"]
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if result.returncode != 0:
         print("❌ Failed to install pip.")
@@ -323,27 +317,19 @@ def install_pip(python_exe=None):
     print("✅ pip installed.")
     return True
 
-
 def install_base_packages(python_exe=None):
     """Install the base packages (flask, etc.) into the given Python."""
     print("📦 Installing base packages...")
     if python_exe is None:
         python_exe = EMBEDDED_PYTHON
-    if not run_pip_command(
-        ["-m", "pip", "install", "--upgrade", "pip"],
-        isolated=True,
-        python_exe=python_exe,
-    ):
+    if not run_pip_command(["-m", "pip", "install", "--upgrade", "pip"], isolated=True, python_exe=python_exe):
         print("⚠️ Pip upgrade failed, continuing anyway.")
     for pkg in BASE_PACKAGES:
         print(f"   Installing {pkg}...")
-        if not run_pip_command(
-            ["-m", "pip", "install", pkg], isolated=True, python_exe=python_exe
-        ):
+        if not run_pip_command(["-m", "pip", "install", pkg], isolated=True, python_exe=python_exe):
             print(f"❌ Failed to install {pkg}.")
             return False
     return True
-
 
 def get_certifi_path(python_exe=None):
     """Return the path to certifi's CA bundle, or None if certifi not installed."""
@@ -352,10 +338,8 @@ def get_certifi_path(python_exe=None):
     try:
         result = subprocess.run(
             [str(python_exe), "-c", "import certifi; print(certifi.where())"],
-            capture_output=True,
-            text=True,
-            check=True,
-            env={"PYTHONNOUSERSITE": "1"},
+            capture_output=True, text=True, check=True,
+            env={"PYTHONNOUSERSITE": "1"}
         )
         path = result.stdout.strip()
         if path and Path(path).exists():
@@ -363,7 +347,6 @@ def get_certifi_path(python_exe=None):
     except Exception:
         pass
     return None
-
 
 def download_portablemc_binary():
     """Download and extract the native portablemc binary into BASE_DIR."""
@@ -377,14 +360,18 @@ def download_portablemc_binary():
         urllib.request.urlretrieve(url, archive_path)
     except Exception as e:
         print(f"⚠️ First download attempt failed: {e}")
-        print("📥 Retrying with SSL verification disabled (insecure)...")
-        try:
-            ssl_context = ssl._create_unverified_context()
-            with urllib.request.urlopen(url, context=ssl_context) as response:
-                with open(archive_path, "wb") as out_file:
-                    out_file.write(response.read())
-        except Exception as e2:
-            print(f"❌ Failed to download even with unverified SSL: {e2}")
+        if ALLOW_INSECURE_SSL:
+            print("📥 Retrying with SSL verification disabled...")
+            try:
+                context = get_ssl_context()
+                with urllib.request.urlopen(url, context=context) as response:
+                    with open(archive_path, 'wb') as out_file:
+                        out_file.write(response.read())
+            except Exception as e2:
+                print(f"❌ Failed to download even with unverified SSL: {e2}")
+                return False
+        else:
+            print("❌ Download failed and insecure SSL is disabled.")
             return False
 
     PORTABLEMC_BIN_DIR.mkdir(exist_ok=True)
@@ -409,7 +396,6 @@ def download_portablemc_binary():
     print(f"✅ portablemc binary extracted to {PORTABLEMC_BIN_DIR}")
     return True
 
-
 def test_portablemc(python_exe=None):
     """Check if portablemc is available (binary or module). Returns 'binary' or 'module' or None."""
     # Try binary first
@@ -421,13 +407,8 @@ def test_portablemc(python_exe=None):
         env = os.environ.copy()
         env["PATH"] = str(PORTABLEMC_BIN_DIR) + os.pathsep + env.get("PATH", "")
         try:
-            result = subprocess.run(
-                [str(binary_path), "--help"],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            result = subprocess.run([str(binary_path), "--help"], env=env,
+                                    capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 print("✅ portablemc binary works.")
                 return "binary"
@@ -450,7 +431,6 @@ def test_portablemc(python_exe=None):
         print("⏱️ portablemc module check timed out, assuming not available.")
     return None
 
-
 def ensure_portablemc(python_exe=None):
     """Make portablemc available – try binary, fallback to pip. Returns method string or None."""
     method = test_portablemc(python_exe)
@@ -462,35 +442,38 @@ def ensure_portablemc(python_exe=None):
             return method
         print("⚠️ Binary download failed, falling back to pip.")
     print("📦 Installing portablemc via pip...")
-    if run_pip_command(
-        ["-m", "pip", "install", "portablemc"], isolated=True, python_exe=python_exe
-    ):
+    if run_pip_command(["-m", "pip", "install", "portablemc"], isolated=True, python_exe=python_exe):
         method = test_portablemc(python_exe)
         if method:
             return method
     return None
 
-
 # --- System Python detection ---
 def get_system_python():
     """Find a system Python 3.x executable, preferring 3.11 or higher.
-    Returns the path to a usable Python interpreter, or None.
+       Returns the path to a usable Python interpreter, or None.
+       Priority order: current interpreter, PATH, registry, common install paths.
     """
     candidates = []
+    seen = set()
 
-    # Add the current interpreter (if it's not the embedded Python we're trying to set up)
+    def add_candidate(p):
+        p = Path(p).resolve()
+        if p.exists() and p not in seen:
+            seen.add(p)
+            candidates.append(p)
+
+    # 1. Current interpreter (if it's not the embedded one)
     current = Path(sys.executable)
-    if current.exists() and current != EMBEDDED_PYTHON:
-        try:
-            result = subprocess.run(
-                [str(current), "--version"], capture_output=True, text=True, timeout=2
-            )
-            if result.returncode == 0 and "Python 3" in result.stdout:
-                candidates.append(current)
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
-            pass
+    if current != EMBEDDED_PYTHON:
+        add_candidate(current)
 
-    # From registry (both HKCU and HKLM)
+    # 2. Search PATH (most likely to be user's preferred Python)
+    for dir in os.environ.get("PATH", "").split(os.pathsep):
+        add_candidate(Path(dir) / "python.exe")
+        add_candidate(Path(dir) / "python3.exe")
+
+    # 3. Registry (both HKCU and HKLM)
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         try:
             key = winreg.OpenKey(hive, r"Software\Python\PythonCore")
@@ -502,51 +485,35 @@ def get_system_python():
                 ver = winreg.EnumKey(key, i)
                 if ver.startswith("3."):
                     install_path = winreg.QueryValue(key, f"{ver}\\InstallPath")
-                    candidates.append(Path(install_path) / "python.exe")
+                    add_candidate(Path(install_path) / "python.exe")
                 i += 1
             except WindowsError:
                 break
         winreg.CloseKey(key)
 
-    # Common install locations
-    versions = ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]
-    common_paths = []
-    for ver in versions:
-        common_paths.append(f"C:\\Python{ver.replace('.', '')}\\python.exe")
-        common_paths.append(
-            f"C:\\Users\\{os.environ.get('USERNAME')}\\AppData\\Local\\Programs\\Python\\Python{ver.replace('.', '')}\\python.exe"
-        )
-        common_paths.append(
-            f"C:\\Program Files\\Python{ver.replace('.', '')}\\python.exe"
-        )
-        common_paths.append(
-            f"C:\\Program Files (x86)\\Python{ver.replace('.', '')}\\python.exe"
-        )
-    common_paths.append(r"C:\Windows\Sysnative\python.exe")
-    common_paths.append(r"C:\Windows\System32\python.exe")
-    for p in common_paths:
-        candidates.append(Path(p))
+    # 4. Common install locations (static paths)
+    for ver in PYTHON_VERSIONS:
+        num = ver.replace('.', '')
+        # System-wide installations
+        for base in (r"C:\Python{}", r"C:\Program Files\Python{}", r"C:\Program Files (x86)\Python{}"):
+            add_candidate(base.format(num) + "\\python.exe")
+        # User installations
+        user_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Programs" / f"Python{num}"
+        add_candidate(user_dir / "python.exe")
+    # Sysnative and System32 (often contain a 64-bit Python from WOW64)
+    add_candidate(r"C:\Windows\Sysnative\python.exe")
+    add_candidate(r"C:\Windows\System32\python.exe")
 
-    # Also search PATH
-    for dir in os.environ.get("PATH", "").split(os.pathsep):
-        candidates.append(Path(dir) / "python.exe")
-        candidates.append(Path(dir) / "python3.exe")
-
-    # Remove duplicates and check version
-    seen = set()
+    # Now verify each candidate and extract version
     valid = []
     for p in candidates:
-        if p.exists() and p not in seen:
-            seen.add(p)
-            try:
-                result = subprocess.run(
-                    [str(p), "--version"], capture_output=True, text=True, timeout=2
-                )
-                if result.returncode == 0 and "Python 3" in result.stdout:
-                    version_str = result.stdout.strip().split()[1]  # e.g., "3.11.5"
-                    valid.append((version_str, p))
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
-                pass
+        try:
+            result = subprocess.run([str(p), "--version"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and "Python 3" in result.stdout:
+                version_str = result.stdout.strip().split()[1]  # e.g., "3.11.5"
+                valid.append((version_str, p))
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+            continue
 
     if not valid:
         return None
@@ -556,7 +523,6 @@ def get_system_python():
     best = valid[0][1]
     print(f"Selected system Python: {best}")
     return best
-
 
 # --- Launcher functions ---
 def launch_launcher(method, python_exe=None):
@@ -599,7 +565,6 @@ def launch_launcher(method, python_exe=None):
         print("⏹️ Interrupted by user.")
     return True
 
-
 def run_web_launcher():
     """Attempt to use embedded Python; if blocked, fall back to system Python."""
     print("\n=== Bootstrapping environment for web launcher ===\n")
@@ -617,12 +582,8 @@ def run_web_launcher():
             env_check = os.environ.copy()
             env_check["PYTHONNOUSERSITE"] = "1"
             env_check["PYTHONPATH"] = ""
-            pip_check = subprocess.run(
-                [str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
-                env=env_check,
-                capture_output=True,
-                text=True,
-            )
+            pip_check = subprocess.run([str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
+                                       env=env_check, capture_output=True, text=True)
             if pip_check.returncode != 0:
                 print("📦 pip not found, installing...")
                 if not install_pip(EMBEDDED_PYTHON):
@@ -678,7 +639,6 @@ def run_web_launcher():
     # Launch portablemc.py with system Python, using the same environment
     return launch_launcher(method, sys_python)
 
-
 def run_msbuild_launcher():
     print("\n=== Launching via MSBuild ===\n")
     # Move static folders and game files before launch
@@ -692,13 +652,15 @@ def run_msbuild_launcher():
 
     env = os.environ.copy()
     env["__COMPAT_LAYER"] = "RUNASINVOKER"
+    if ALLOW_INSECURE_SSL:
+        env["ALLOW_INSECURE_SSL"] = "true"
 
     cmd = [
         MSBUILD_PATH,
         str(TARGETS_FILE),
         f"/p:Username={DEFAULT_USERNAME}",
         f"/p:ServerIp={DEFAULT_SERVER_IP}",
-        f'/p:JvmOpts="{DEFAULT_JVM_OPTS}"',
+        f"/p:JvmOpts={DEFAULT_JVM_OPTS}" 
     ]
     print(f"Executing: {' '.join(cmd)}")
     try:
@@ -709,7 +671,6 @@ def run_msbuild_launcher():
     except KeyboardInterrupt:
         print("⏹️ Interrupted by user.")
     return True
-
 
 def run_cli_launcher():
     """Launch portablemc in CLI mode using the embedded Python (or system Python fallback)."""
@@ -727,12 +688,8 @@ def run_cli_launcher():
             env_check = os.environ.copy()
             env_check["PYTHONNOUSERSITE"] = "1"
             env_check["PYTHONPATH"] = ""
-            pip_check = subprocess.run(
-                [str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
-                env=env_check,
-                capture_output=True,
-                text=True,
-            )
+            pip_check = subprocess.run([str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
+                                       env=env_check, capture_output=True, text=True)
             if pip_check.returncode != 0:
                 print("📦 pip not found, installing...")
                 if not install_pip(EMBEDDED_PYTHON):
@@ -741,11 +698,7 @@ def run_cli_launcher():
                 print(f"✅ pip already installed: {pip_check.stdout.strip()}")
 
             print("📦 Installing portablemc via pip...")
-            if not run_pip_command(
-                ["-m", "pip", "install", "portablemc"],
-                isolated=True,
-                python_exe=EMBEDDED_PYTHON,
-            ):
+            if not run_pip_command(["-m", "pip", "install", "portablemc"], isolated=True, python_exe=EMBEDDED_PYTHON):
                 print("❌ Failed to install portablemc.")
                 return False
 
@@ -758,25 +711,19 @@ def run_cli_launcher():
 
             # Build CLI arguments (module syntax)
             cmd = [
-                str(EMBEDDED_PYTHON),
-                "-m",
-                "portablemc",
-                "--main-dir",
-                ".",
+                str(EMBEDDED_PYTHON), "-m", "portablemc",
+                "--main-dir", ".",
                 "start",
-                "--server",
-                DEFAULT_SERVER_IP,
-                "--jvm-args",
-                DEFAULT_JVM_OPTS,
+                "--server", DEFAULT_SERVER_IP,
+                "--jvm-args", DEFAULT_JVM_OPTS,
                 "fabric:",
-                "-u",
-                DEFAULT_USERNAME,
+                "-u", DEFAULT_USERNAME
             ]
             env = os.environ.copy()
             env["__COMPAT_LAYER"] = "RUNASINVOKER"
             env["PYTHONNOUSERSITE"] = "1"
             env["PYTHONPATH"] = ""
-            env["LAUNCHER_ROOT"] = str(ROOT_DIR)  # for completeness
+            env["LAUNCHER_ROOT"] = str(ROOT_DIR)   # for completeness
             print(f"🚀 Launching: {' '.join(cmd)}")
             try:
                 subprocess.run(cmd, env=env, cwd=BASE_DIR, check=True)
@@ -820,19 +767,13 @@ def run_cli_launcher():
 
     # Build CLI arguments (module syntax)
     cmd = [
-        str(sys_python),
-        "-m",
-        "portablemc",
-        "--main-dir",
-        ".",
+        str(sys_python), "-m", "portablemc",
+        "--main-dir", ".",
         "start",
-        "--server",
-        DEFAULT_SERVER_IP,
-        "--jvm-args",
-        DEFAULT_JVM_OPTS,
+        "--server", DEFAULT_SERVER_IP,
+        "--jvm-args", DEFAULT_JVM_OPTS,
         "fabric:",
-        "-u",
-        DEFAULT_USERNAME,
+        "-u", DEFAULT_USERNAME
     ]
     env["__COMPAT_LAYER"] = "RUNASINVOKER"
     env["LAUNCHER_ROOT"] = str(ROOT_DIR)
@@ -845,7 +786,6 @@ def run_cli_launcher():
     except KeyboardInterrupt:
         print("⏹️ Interrupted by user.")
     return True
-
 
 def main():
     # Display menu
@@ -872,7 +812,6 @@ def main():
         sys.exit(1)
 
     sys.exit(0 if success else 1)
-
 
 if __name__ == "__main__":
     main()

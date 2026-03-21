@@ -1,6 +1,6 @@
 ' Launcher.vbs
 ' Usage: cscript Launcher.vbs <Username> <ServerIp> <JvmOpts>
-' Stores all files in %LOCALAPPDATA%\PortableMC and forces junction recreation for mods/resourcepacks.
+' Stores all files in %LOCALAPPDATA%\PortableMC
 
 Set args = WScript.Arguments
 If args.Count < 3 Then
@@ -28,27 +28,6 @@ If Not fso.FolderExists(baseDir) Then fso.CreateFolder(baseDir)
 
 binDir = fso.BuildPath(baseDir, "portablemc_bin")
 exePath = fso.BuildPath(binDir, "portablemc.exe")
-
-' --- Helper to create a junction, removing any existing folder/link first ---
-Sub CreateJunction(source, target)
-    ' Ensure source folder exists (create if missing)
-    If Not fso.FolderExists(source) Then fso.CreateFolder(source)
-    ' If target already exists, delete it (whether folder or junction)
-    If fso.FolderExists(target) Then
-        fso.DeleteFolder target, True
-        WScript.Echo "Removed existing target: " & target
-    End If
-    WScript.Echo "Creating junction: " & target & " -> " & source
-    ' Use cmd /c mklink /J (target must not exist before)
-    cmd = "cmd /c mklink /J """ & target & """ """ & source & """"
-    shell.Run cmd, 0, True
-    ' Junction creation doesn't set exit code easily; assume success if target now exists
-    If fso.FolderExists(target) Then
-        WScript.Echo "Junction created successfully."
-    Else
-        WScript.Echo "Failed to create junction. Ensure source exists and you're on the same drive."
-    End If
-End Sub
 
 ' --- Download function with SSL fallback ---
 Function DownloadFile(url, destPath)
@@ -130,10 +109,6 @@ If Not fso.FileExists(exePath) Then
     WScript.Echo "ERROR: portablemc.exe still not found at " & exePath
     WScript.Quit 1
 End If
-
-' --- Create junctions for mods and resourcepacks (force recreation) ---
-CreateJunction fso.BuildPath(rootDir, "mods"), fso.BuildPath(baseDir, "mods")
-CreateJunction fso.BuildPath(rootDir, "resourcepacks"), fso.BuildPath(baseDir, "resourcepacks")
 
 ' --- Build command line ---
 jvmArgs = Replace(jvmOpts, " ", ",")
