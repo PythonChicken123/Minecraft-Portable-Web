@@ -9,12 +9,12 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  ruff:
+  push-fix:
+    if: github.event_name == 'push' && !contains(join(github.event.commits.*.message, ' '), '[skip ci]')
     runs-on: ubuntu-latest
-    # Skip if the commit already contains [skip ci]
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,8 +39,44 @@ jobs:
       - name: Commit and push if changed
         if: steps.git-check.outputs.changed == 'true'
         run: |
-          git config --global user.name "${{ github.event.head_commit.author.name }}"
-          git config --global user.email "${{ github.event.head_commit.author.email }}"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add .
           git commit -m "Apply automatic ruff fixes and formatting [skip ci]"
           git push
+
+  pr-comment:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Ruff
+        uses: astral-sh/ruff-action@v3
+        with:
+          version: "latest"
+
+      - name: Fix linting issues and format
+        run: |
+          ruff check --fix .
+          ruff format .
+
+      - name: Check for changes
+        id: git-check
+        run: |
+          git diff --quiet || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR if changed
+        if: steps.git-check.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '⚠️ **Ruff auto-fix applied**\n\nLinting and formatting changes were automatically applied. Please pull the latest changes or update your branch.'
+            })
