@@ -38,6 +38,11 @@ Minecraft-Portable-Web/
 - (Optional) PowerShell 3.0+ – used as a fallback.
 - (Optional) VBScript support – used as a final fallback.
 
+## TL;DR
+* Test in Windows Sandbox
+* Test on bypassing group policy
+* Sourcery Security fixes
+
 ## Getting Started
 
 ```bash
