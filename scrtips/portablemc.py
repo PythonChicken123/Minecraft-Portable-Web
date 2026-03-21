@@ -10,12 +10,17 @@ import signal
 import shutil
 import threading
 import logging
-import traceback
 import os
 import json
 import importlib.util
 
-app = Flask(__name__)
+# Determine base directory (where Minecraft files are stored)
+APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+BASE_DIR = APPDATA / "PortableMC"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Flask app with static folder in BASE_DIR
+app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 def escape_html(s):
@@ -38,6 +43,12 @@ processes_lock = threading.Lock()
 connected_clients = 0
 clients_lock = threading.Lock()
 logging.basicConfig(level=logging.INFO)
+
+# Path of root of Launcher
+LAUNCHER_ROOT = os.environ.get("LAUNCHER_ROOT")
+if LAUNCHER_ROOT is None:
+    LAUNCHER_ROOT = str(Path(__file__).parent.parent)
+ROOT_DIR = Path(LAUNCHER_ROOT)
 
 # Optional psutil for process tree killing
 try:
@@ -909,6 +920,59 @@ HTML_TEMPLATE = r"""
 </html>
 """
 
+# --- JUNCTIONS ---
+def create_junction(source, target):
+    """
+    Create a junction from source to target.
+    Safely removes any existing target before creating the junction.
+    Returns True if a junction was created, False otherwise (fallback to regular directory).
+    """
+    source_path = Path(source).resolve()
+    target_path = Path(target).resolve()
+
+    # Ensure source exists (create if missing, so junction has a target)
+    source_path.mkdir(parents=True, exist_ok=True)
+
+    # Remove existing target if it exists
+    if target_path.exists():
+        if target_path.is_symlink():
+            # This is a junction (or a symlink) – remove only the junction itself
+            try:
+                os.rmdir(str(target_path))   # works for junctions
+                print(f"Removed existing junction: {target_path}")
+            except Exception as e:
+                print(f"Warning: Could not remove junction {target_path}: {e}")
+        elif target_path.is_dir():
+            # Regular directory – delete its contents but not the source folder
+            if target_path == source_path:
+                print(f"Target {target_path} is the same as source; skipping removal.")
+            else:
+                shutil.rmtree(str(target_path), ignore_errors=True)
+                print(f"Removed existing directory: {target_path}")
+        else:
+            target_path.unlink()
+
+    # Try to create junction
+    try:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(target_path), str(source_path)],
+            check=True, capture_output=True, text=True
+        )
+        print(f"✅ Junction created: {target_path} -> {source_path}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Could not create junction (falling back to regular directory): {e.stderr}")
+        target_path.mkdir(parents=True, exist_ok=True)
+        return False
+
+def ensure_junctions():
+    r"""Ensure mods and resourcepacks directories exist in %LOCALAPPDATA%\PortableMC."""
+    base_dir = BASE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    create_junction(ROOT_DIR / "mods", base_dir / "mods")
+    create_junction(ROOT_DIR / "resourcepacks", base_dir / "resourcepacks")
+
 # --- ROUTES ---
 @socketio.on('connect')
 def handle_connect():
@@ -951,6 +1015,9 @@ def ping():
 
 @app.route("/stream")
 def stream():
+    # --- Create junctions for mods and resourcepacks (like .vbs/.ps1) ---
+    ensure_junctions()   # This will create junctions in %LOCALAPPDATA%\PortableMC
+
     # --- PORTABLEMC AVAILABILITY CHECK ---
     def is_portablemc_available():
         if shutil.which("portablemc"):
@@ -1028,8 +1095,12 @@ def stream():
     else:
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
+    # Determine base directory for portablemc data (same as the launcher uses)
+    local_appdata = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+    base_dir = os.path.join(local_appdata, "PortableMC")
+
     # Global arguments (before 'start')
-    global_args = ["--main-dir", "."]
+    global_args = ["--main-dir", base_dir]
     if not using_binary:
         # Python module supports these extras
         global_args.extend(["--timeout", "60", "--output", "human-color"])
