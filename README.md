@@ -47,9 +47,9 @@ git switch scripts
 python main.py
 ```
 Then choose a method:
-* `1` – Web launcher (opens portablemc.py in your browser)
-* `2` – MSBuild launcher (uses Launcher.targets, compiles C# loader in memory)
-* `3` – CLI launcher (runs portablemc directly in the terminal)
+* `1` – Web launcher (opens `portablemc.py` in your browser)
+* `2` – MSBuild launcher (uses `Launcher.targets`, compiles C# loader in memory)
+* `3` – CLI launcher (runs `portablemc` directly in the terminal)
 
 ## How It Works (Bypass Chain)
 The launcher tries the most reliable method first, falling back if blocked:
@@ -68,7 +68,7 @@ All downloaded files (embedded Python, portablemc binary) are stored in `%LOCALA
 * Workflow: The GitHub Actions workflow (`.github/workflows/main.yml`) automatically applies Ruff fixes on push/pull requests.
 
 ## Troubleshooting
-* OSError: [WinError 1260]` – Group policy blocks the method you chose. Try another option.
+* OSError: `[WinError 1260]` – Group policy blocks the method you chose. Try another option.
 * PowerShell / VBScript errors – Ensure the scripts have proper permissions. The launcher sets `__COMPAT_LAYER=RUNASINVOKER` to avoid UAC prompts.
 * SSL errors – The C# loader and Python scripts force TLS 1.2 and fall back to disabling certificate validation.
 * Junction creation fails – The launcher falls back to creating regular directories.
