@@ -603,7 +603,6 @@ def get_system_python():
     add_candidate(r"C:\Windows\System32\python.exe")
 
     # Verify candidates
-    import re
     valid = []
     for p in candidates:
         try:
