@@ -33,7 +33,7 @@ Minecraft-Portable-Web/
 ## Requirements
 
 - Windows 7/8/10/11
-- Python 3.11+ (any version) OR the script will download an embedded Python 3.14.
+- Python 3.11+ (or the script will download an embedded Python 3.14).
 - (Optional) MSBuild (comes with .NET Framework 4.8) – used for the C# fallback.
 - (Optional) PowerShell 3.0+ – used as a fallback.
 - (Optional) VBScript support – used as a final fallback.
