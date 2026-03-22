@@ -41,7 +41,6 @@ Minecraft-Portable-Web/
 ## TL;DR
 * Test in **Windows Sandbox**
 * Test on a **Restricted Environment** by **Group Policy**
-* Apply Sourcery **security fixes** as recommended below
 
 ## Getting Started
 
