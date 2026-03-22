@@ -564,17 +564,17 @@ def get_system_python():
             seen.add(p)
             candidates.append(p)
 
-    # 1. Current interpreter (if it's not the embedded one)
+    # 1. Current interpreter (if it's not embedded)
     current = Path(sys.executable)
-    if current != EMBEDDED_PYTHON and not str(p).startswith(str(BASE_DIR)):
+    if current != EMBEDDED_PYTHON and not str(current).startswith(str(BASE_DIR)):
         add_candidate(current)
 
-    # 2. Search PATH (most likely to be user's preferred Python)
+    # 2. Search PATH
     for dir in os.environ.get("PATH", "").split(os.pathsep):
         add_candidate(Path(dir) / "python.exe")
         add_candidate(Path(dir) / "python3.exe")
 
-    # 3. Registry (both HKCU and HKLM)
+    # 3. Registry
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         try:
             key = winreg.OpenKey(hive, r"Software\Python\PythonCore")
@@ -592,27 +592,24 @@ def get_system_python():
                 break
         winreg.CloseKey(key)
 
-    # 4. Common install locations (static paths)
+    # 4. Common install locations
     for ver in PYTHON_VERSIONS:
         num = ver.replace('.', '')
-        # System-wide installations
         for base in (r"C:\Python{}", r"C:\Program Files\Python{}", r"C:\Program Files (x86)\Python{}"):
             add_candidate(base.format(num) + "\\python.exe")
-        # User installations
         user_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Programs" / f"Python{num}"
         add_candidate(user_dir / "python.exe")
-    # Sysnative and System32 (often contain a 64-bit Python from WOW64)
     add_candidate(r"C:\Windows\Sysnative\python.exe")
     add_candidate(r"C:\Windows\System32\python.exe")
 
-    # Now verify each candidate and extract version
+    # Verify candidates
+    import re
     valid = []
     for p in candidates:
         try:
             result = subprocess.run([str(p), "--version"], capture_output=True, text=True, timeout=2)  # nosec
             combined = (result.stdout + result.stderr).strip()
             if result.returncode == 0 and "Python 3" in combined:
-                # Extract version using regex to handle suffixes like "3.11.0rc1"
                 match = re.search(r'\d+(?:\.\d+)+', combined)
                 if match:
                     version_str = match.group()
@@ -623,7 +620,6 @@ def get_system_python():
     if not valid:
         return None
 
-    # Sort by version descending (higher version first)
     valid.sort(key=lambda x: tuple(map(int, x[0].split('.'))), reverse=True)
     best = valid[0][1]
     print(f"Selected system Python: {best}")
