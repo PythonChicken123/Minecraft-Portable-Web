@@ -6,6 +6,28 @@
       <ExeFile>$(TempDir)\PortableMCLoader.exe</ExeFile>
       <CsSource>$(MSBuildProjectDirectory)\PortableMCLoader.cs</CsSource>
       <Success>false</Success>
+
+      <!-- Find csc.exe in all possible locations (priority order) -->
+      <CscPath>$(SystemRoot)\Microsoft.NET\Framework64\v4.0.30319\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(SystemRoot)\Microsoft.NET\Framework\v4.0.30319\csc.exe</CscPath>
+      <!-- Visual Studio 2022 (Roslyn) -->
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <!-- Visual Studio 2019 (Roslyn) -->
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2019\Community\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe</CscPath>
+      <!-- Visual Studio 2017 (Roslyn) -->
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2017\Enterprise\MSBuild\15.0\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2017\Professional\MSBuild\15.0\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\Roslyn\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(ProgramFiles)\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\Roslyn\csc.exe</CscPath>
+      <!-- MSBuild tools path (fallback) -->
+      <CscPath Condition="!Exists('$(CscPath)')">$(MSBuildToolsPath)\csc.exe</CscPath>
+      <CscPath Condition="!Exists('$(CscPath)')">$(MSBuildToolsPath)\Roslyn\csc.exe</CscPath>
     </PropertyGroup>
 
     <!-- 1. Copy source if exists -->
@@ -15,7 +37,7 @@
 
     <!-- 2. Compile and run if source exists -->
     <Exec Condition="Exists('$(CsFile)')"
-          Command="&quot;$(MSBuildToolsPath)\csc.exe&quot; /target:exe /out:&quot;$(ExeFile)&quot; /reference:System.IO.Compression.FileSystem.dll &quot;$(CsFile)&quot;"
+          Command="&quot;$(CscPath)&quot; /target:exe /out:&quot;$(ExeFile)&quot; /reference:System.IO.Compression.FileSystem.dll &quot;$(CsFile)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="CscExitCode"/>
     </Exec>
