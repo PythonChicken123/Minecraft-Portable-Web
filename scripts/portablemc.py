@@ -15,13 +15,13 @@ import json
 import importlib.util
 
 # --- Guard: must be launched through main.py ---
-LAUNCHER_ROOT = os.environ["LAUNCHER_ROOT"]
-ROOT_DIR = Path(LAUNCHER_ROOT)
-if os.environ.get("LAUNCHER_ROOT") is None:
+launcher_root = os.environ.get("LAUNCHER_ROOT")
+if launcher_root is None:
     print("⚠️ This script is designed to be launched through main.py.")
     print("⚠️ Please run main.py and select the web launcher option.")
-    print("⚠️ Direct execution is not supported.")
     sys.exit(1)
+
+ROOT_DIR = Path(launcher_root)
 
 # Determine base directory (where Minecraft files are stored)
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
@@ -32,14 +32,12 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-
 def escape_html(s):
     """Escape only &, <, > for safe innerHTML – leaves quotes and apostrophes untouched."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 # --- CONFIGURATION ---
-VALID_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,16}$")
+VALID_USERNAME_REGEX = re.compile(r'^[a-zA-Z0-9_]{3,16}$')
 FORBIDDEN_LIST = ["CubeUniform840", "Admin", "Owner"]
 PASS_KEY = "1234"
 SERVER_IP = "77.103.184.72"
@@ -58,7 +56,6 @@ logging.basicConfig(level=logging.INFO)
 # Optional psutil for process tree killing
 try:
     import psutil
-
     PSUTIL_AVAILABLE = True
 except ImportError:
     psutil = None
@@ -71,7 +68,6 @@ except ImportError:
 # Fallbacks when certain libraries are restricted/corrupted/disabled
 try:
     from ansi2html import Ansi2HTMLConverter
-
     ansi_converter = Ansi2HTMLConverter(dark_bg=True, inline=True)
     use_server_conversion = True
 except ImportError:
@@ -927,38 +923,34 @@ HTML_TEMPLATE = r"""
 </html>
 """
 
-
 # --- ROUTES ---
-@socketio.on("connect")
+@socketio.on('connect')
 def handle_connect():
     global connected_clients
     with clients_lock:
         connected_clients += 1
         client_id = request.sid
-        print(f"Client connected: {client_id} (Total: {connected_clients})")
-    emit("status", {"core": "online", "minecraft": "checking"})
+        print(f'Client connected: {client_id} (Total: {connected_clients})')
+    emit('status', {'core': 'online', 'minecraft': 'checking'})
 
-
-@socketio.on("disconnect")
+@socketio.on('disconnect')
 def handle_disconnect():
     global connected_clients
     with clients_lock:
         connected_clients -= 1
         client_id = request.sid
-        print(f"Client disconnected: {client_id} (Total: {connected_clients})")
+        print(f'Client disconnected: {client_id} (Total: {connected_clients})')
 
-
-@socketio.on("ping_minecraft")
+@socketio.on('ping_minecraft')
 def handle_ping_minecraft():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1.5)
         s.connect((SERVER_IP, 25565))
         s.close()
-        emit("minecraft_status", {"online": True})
+        emit('minecraft_status', {'online': True})
     except Exception:
-        emit("minecraft_status", {"online": False})
-
+        emit('minecraft_status', {'online': False})
 
 @app.route("/ping")
 def ping():
@@ -971,7 +963,6 @@ def ping():
     except Exception:
         return jsonify(online=False), 200
 
-
 @app.route("/stream")
 def stream():
     # --- PORTABLEMC AVAILABILITY CHECK ---
@@ -981,17 +972,15 @@ def stream():
         return importlib.util.find_spec("portablemc") is not None
 
     if not is_portablemc_available():
-
         def error_gen():
             lines = [
                 "\x1b[91m[!] PORTABLEMC NOT FOUND\x1b[0m",
-                "\x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m",
+                "\x1b[93mPlease install it via 'pip install portablemc'.\x1b[0m"
             ]
             for line in lines:
-                payload = json.dumps({"type": "ansi", "content": line})
+                payload = json.dumps({'type': 'ansi', 'content': line})
                 yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- GET USER INPUT ---
@@ -1000,44 +989,31 @@ def stream():
 
     # --- VALIDATIONS (JSON wrapped) ---
     if not user:
-
         def error_gen():
-            payload = json.dumps(
-                {"type": "ansi", "content": "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"}
-            )
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] USERNAME REQUIRED\x1b[0m"})
             yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     if not VALID_USERNAME_REGEX.match(user):
-
         def error_gen():
             lines = [
                 "\x1b[91m[!] INVALID USERNAME\x1b[0m",
-                "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m",
+                "\x1b[93mUsername must be 3-16 characters and only letters, numbers, or underscore.\x1b[0m"
             ]
             for line in lines:
-                payload = json.dumps({"type": "ansi", "content": line})
+                payload = json.dumps({'type': 'ansi', 'content': line})
                 yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     user_lower = user.lower()
     forbidden_lower = [name.lower() for name in FORBIDDEN_LIST]
     if user_lower in forbidden_lower and password != PASS_KEY:
-
         def error_gen():
-            payload = json.dumps(
-                {
-                    "type": "ansi",
-                    "content": "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m",
-                }
-            )
+            payload = json.dumps({'type': 'ansi', 'content': "\x1b[91m[!] ACCESS DENIED – INVALID SECURE_KEY\x1b[0m"})
             yield f"data: {payload}\n\n"
             yield "data: CLOSE\n\n"
-
         return Response(error_gen(), mimetype="text/event-stream")
 
     # --- PREVENT MULTIPLE LAUNCHES (thread-safe) ---
@@ -1046,15 +1022,13 @@ def stream():
             lines = [
                 "\x1b[91m[!] CORE BUSY\x1b[0m",
                 "\x1b[93mAnother Minecraft instance is already running.\x1b[0m",
-                "\x1b[90mPlease close the game before launching again.\x1b[0m",
+                "\x1b[90mPlease close the game before launching again.\x1b[0m"
             ]
-
             def error_gen():
                 for line in lines:
-                    payload = json.dumps({"type": "ansi", "content": line})
+                    payload = json.dumps({'type': 'ansi', 'content': line})
                     yield f"data: {payload}\n\n"
                 yield "data: CLOSE\n\n"
-
             return Response(error_gen(), mimetype="text/event-stream")
         if user in active_processes:
             del active_processes[user]
@@ -1069,9 +1043,7 @@ def stream():
         launcher_cmd = [sys.executable, "-m", "portablemc"]
 
     # Determine base directory for portablemc data (same as the launcher uses)
-    local_appdata = os.environ.get(
-        "LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local")
-    )
+    local_appdata = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
     base_dir = os.path.join(local_appdata, "PortableMC")
 
     # Global arguments (before 'start')
@@ -1127,15 +1099,13 @@ def stream():
         try:
             with processes_lock:
                 if user in active_processes and active_processes[user].poll() is None:
-                    busy_payload = json.dumps(
-                        {"type": "ansi", "content": "\x1b[91m[!] CORE BUSY\x1b[0m"}
-                    )
+                    busy_payload = json.dumps({'type': 'ansi', 'content': '\x1b[91m[!] CORE BUSY\x1b[0m'})
                     yield f"data: {busy_payload}\n\n"
                     yield "data: CLOSE\n\n"
                     return
 
                 startupinfo = None
-                if os.name == "nt":
+                if os.name == 'nt':
                     startupinfo = subprocess.STARTUPINFO()
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     startupinfo.wShowWindow = subprocess.SW_HIDE
@@ -1151,7 +1121,7 @@ def stream():
                     errors="replace",
                     bufsize=1,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                    startupinfo=startupinfo,
+                    startupinfo=startupinfo
                 )
                 active_processes[user] = process
                 logging.info(f"Started process for {user} with PID {process.pid}")
@@ -1163,12 +1133,7 @@ def stream():
 
             while True:
                 if closed_event.is_set():
-                    disc_msg = json.dumps(
-                        {
-                            "type": "ansi",
-                            "content": "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m",
-                        }
-                    )
+                    disc_msg = json.dumps({'type': 'ansi', 'content': "\x1b[91m[SYSTEM] CONNECTION CLOSED\x1b[0m"})
                     try:
                         yield f"data: {disc_msg}\n\n"
                     except (BrokenPipeError, OSError, GeneratorExit):
@@ -1181,7 +1146,7 @@ def stream():
                         break
                     continue
 
-                raw_line = line.rstrip("\n")
+                raw_line = line.rstrip('\n')
                 now = time.perf_counter()
 
                 if not ok_reached and "[ OK ]" in raw_line:
@@ -1192,23 +1157,18 @@ def stream():
                 if use_server_conversion and ansi_converter:
                     try:
                         safe_line = escape_html(raw_line)
-                        html_line = ansi_converter.convert(
-                            safe_line, full=False
-                        ).strip()
-                        payload = json.dumps({"type": "html", "content": html_line})
+                        html_line = ansi_converter.convert(safe_line, full=False).strip()
+                        payload = json.dumps({'type': 'html', 'content': html_line})
                     except Exception as e:
                         logging.error(f"Conversion failed: {e}, sending raw ANSI")
-                        payload = json.dumps({"type": "ansi", "content": raw_line})
+                        payload = json.dumps({'type': 'ansi', 'content': raw_line})
                 else:
-                    payload = json.dumps({"type": "ansi", "content": raw_line})
+                    payload = json.dumps({'type': 'ansi', 'content': raw_line})
 
                 try:
                     if progress_match and not ok_reached:
                         current_file = progress_match.group(1)
-                        if (
-                            current_file != last_progress
-                            and (now - last_send_time) > update_interval
-                        ):
+                        if current_file != last_progress and (now - last_send_time) > update_interval:
                             yield f"data: {payload}\n\n"
                             last_progress = current_file
                             last_send_time = now
@@ -1222,21 +1182,14 @@ def stream():
         except FileNotFoundError as e:
             if not closed_event.is_set():
                 try:
-                    payload = json.dumps(
-                        {
-                            "type": "ansi",
-                            "content": f"\x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m",
-                        }
-                    )
+                    payload = json.dumps({'type': 'ansi', 'content': f"\x1b[91m[SYSTEM] Launcher not found: {str(e)}\x1b[0m"})
                     yield f"data: {payload}\n\n"
                 except Exception:
                     pass
         except Exception as e:
             if not closed_event.is_set():
                 try:
-                    payload = json.dumps(
-                        {"type": "ansi", "content": f"[SYSTEM ERROR] {str(e)}"}
-                    )
+                    payload = json.dumps({'type': 'ansi', 'content': f"[SYSTEM ERROR] {str(e)}"})
                     yield f"data: {payload}\n\n"
                 except Exception:
                     pass
@@ -1251,18 +1204,8 @@ def stream():
 
             if not got_generator_exit:
                 try:
-                    ended_msg = json.dumps(
-                        {
-                            "type": "ansi",
-                            "content": "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m",
-                        }
-                    )
-                    tip_msg = json.dumps(
-                        {
-                            "type": "ansi",
-                            "content": "\x1b[34m[TIP] Click the console to return to login.\x1b[0m",
-                        }
-                    )
+                    ended_msg = json.dumps({'type': 'ansi', 'content': "\x1b[90m[SYSTEM] SESSION ENDED\x1b[0m"})
+                    tip_msg = json.dumps({'type': 'ansi', 'content': "\x1b[34m[TIP] Click the console to return to login.\x1b[0m"})
                     yield f"data: {ended_msg}\n\n"
                     yield f"data: {tip_msg}\n\n"
                     yield "data: CLOSE\n\n"
@@ -1275,11 +1218,9 @@ def stream():
     response.call_on_close(closed_event.set)
     return response
 
-
 @app.route("/")
 def home():
     return render_template_string(HTML_TEMPLATE, forbidden_list=FORBIDDEN_LIST)
-
 
 def kill_process_tree(proc):
     """Kill a process and all its children. Falls back to simple kill if psutil missing."""
@@ -1307,14 +1248,12 @@ def kill_process_tree(proc):
             proc.kill()
         logging.info(f"Terminated process PID {proc.pid} (psutil unavailable)")
 
-
 def graceful_shutdown(sig, frame):
     logging.info("SHUTTING DOWN CORE...")
     with processes_lock:
         for user, proc in list(active_processes.items()):
             kill_process_tree(proc)
     sys.exit(0)
-
 
 signal.signal(signal.SIGINT, graceful_shutdown)
 
