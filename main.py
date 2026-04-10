@@ -475,7 +475,7 @@ def run_debug_menu():
             selected, candidates, probes = _resolve_trusted_dir(LAUNCHER_STATE)
             print(f"Selected trusted dir: {selected}")
             print(json.dumps({str(k): v for k, v in probes.items()}, indent=2))
-        elif choice == "b" or "q":
+        elif choice in ("b", "q"):
             return
         else:
             print("Invalid debug choice.")
