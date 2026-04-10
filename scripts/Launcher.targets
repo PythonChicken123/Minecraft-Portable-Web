@@ -1,6 +1,11 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Target Name="Launch">
     <PropertyGroup>
+      <!-- Restricted-policy defaults: avoid csc/cscript unless explicitly enabled -->
+      <UsePowerShell Condition="'$(UsePowerShell)'==''">true</UsePowerShell>
+      <UseCsc Condition="'$(UseCsc)'==''">false</UseCsc>
+      <UseVbs Condition="'$(UseVbs)'==''">false</UseVbs>
+
       <TempDir>$(TEMP)</TempDir>
       <CsFile>$(TempDir)\PortableMCLoader.cs</CsFile>
       <ExeFile>$(TempDir)\PortableMCLoader.exe</ExeFile>
@@ -31,46 +36,46 @@
     </PropertyGroup>
 
     <!-- 1. Copy source if exists -->
-    <Copy Condition="Exists('$(CsSource)')"
+    <Copy Condition="'$(UseCsc)' == 'true' And Exists('$(CsSource)')"
           SourceFiles="$(CsSource)"
           DestinationFolder="$(TempDir)" />
 
     <!-- 2. Compile and run if source exists -->
-    <Exec Condition="Exists('$(CsFile)')"
+    <Exec Condition="'$(UseCsc)' == 'true' And Exists('$(CsFile)')"
           Command="&quot;$(CscPath)&quot; /target:exe /out:&quot;$(ExeFile)&quot; /reference:System.IO.Compression.FileSystem.dll &quot;$(CsFile)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="CscExitCode"/>
     </Exec>
 
-    <Exec Condition="Exists('$(CsFile)') And $(CscExitCode) == 0"
+    <Exec Condition="'$(UseCsc)' == 'true' And Exists('$(CsFile)') And $(CscExitCode) == 0"
           Command="&quot;$(ExeFile)&quot; &quot;$(Username)&quot; &quot;$(ServerIp)&quot; &quot;$(JvmOpts)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="ExeExitCode"/>
     </Exec>
 
-    <PropertyGroup Condition="Exists('$(CsFile)') And $(CscExitCode) == 0 And $(ExeExitCode) == 0">
+    <PropertyGroup Condition="'$(UseCsc)' == 'true' And Exists('$(CsFile)') And $(CscExitCode) == 0 And $(ExeExitCode) == 0">
       <Success>true</Success>
     </PropertyGroup>
 
-    <!-- 3. VBScript fallback -->
-    <Exec Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs')"
-          Command="cscript //nologo &quot;$(MSBuildProjectDirectory)\Launcher.vbs&quot; &quot;$(Username)&quot; &quot;$(ServerIp)&quot; &quot;$(JvmOpts)&quot;"
-          ContinueOnError="true">
-      <Output TaskParameter="ExitCode" PropertyName="VbsExitCode"/>
-    </Exec>
-
-    <PropertyGroup Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs') And $(VbsExitCode) == 0">
-      <Success>true</Success>
-    </PropertyGroup>
-
-    <!-- 4. PowerShell fallback -->
-    <Exec Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1')"
+    <!-- 3. PowerShell fallback (preferred in restricted environments) -->
+    <Exec Condition="'$(UsePowerShell)' == 'true' And !$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1')"
           Command="powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;$(MSBuildProjectDirectory)\Launcher.ps1&quot; -Username &quot;$(Username)&quot; -ServerIp &quot;$(ServerIp)&quot; -JvmOpts &quot;$(JvmOpts)&quot;"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="PsExitCode"/>
     </Exec>
 
-    <PropertyGroup Condition="!$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1') And $(PsExitCode) == 0">
+    <PropertyGroup Condition="'$(UsePowerShell)' == 'true' And !$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.ps1') And $(PsExitCode) == 0">
+      <Success>true</Success>
+    </PropertyGroup>
+
+    <!-- 4. VBScript fallback (opt-in) -->
+    <Exec Condition="'$(UseVbs)' == 'true' And !$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs')"
+          Command="cscript //nologo &quot;$(MSBuildProjectDirectory)\Launcher.vbs&quot; &quot;$(Username)&quot; &quot;$(ServerIp)&quot; &quot;$(JvmOpts)&quot;"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="VbsExitCode"/>
+    </Exec>
+
+    <PropertyGroup Condition="'$(UseVbs)' == 'true' And !$(Success) And Exists('$(MSBuildProjectDirectory)\Launcher.vbs') And $(VbsExitCode) == 0">
       <Success>true</Success>
     </PropertyGroup>
 
