@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 
 # --- Windows-only guard ---
-if platform.system().lower() != 'windows':
+if platform.system().lower() != "windows":
     print("❌ This bootstrap script currently only supports Windows.")
     sys.exit(1)
 
@@ -40,9 +40,13 @@ PYTHON_VERSION = "3.14.3"
 PYTHON_VERSIONS = ["3.15", "3.14", "3.13", "3.12", "3.11"]
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]   
+BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]
 PORTABLEMC_BIN_DIR = BASE_DIR / "portablemc_bin"
-ALLOW_INSECURE_SSL = os.environ.get("ALLOW_INSECURE_SSL", "").lower() in ("1", "true", "yes")
+ALLOW_INSECURE_SSL = os.environ.get("ALLOW_INSECURE_SSL", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Default game settings
 DEFAULT_USERNAME = "CubeUniform840"
@@ -79,6 +83,7 @@ DEFAULT_CONFIG = {
     "allowlist_trusted_dirs": [],
 }
 
+
 def _safe_json_dump(path, payload):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,6 +92,7 @@ def _safe_json_dump(path, payload):
         return True
     except Exception:
         return False
+
 
 def _load_json_file(path):
     try:
@@ -97,6 +103,7 @@ def _load_json_file(path):
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
 
 def _get_builtin_trusted_candidates():
     user_profile = Path(os.environ.get("USERPROFILE", Path.home()))
@@ -114,6 +121,7 @@ def _get_builtin_trusted_candidates():
         program_data / "PortableMC",
         temp_dir / "PortableMC",
     ]
+
 
 def _probe_directory_access(path):
     result = {
@@ -148,7 +156,9 @@ def _probe_directory_access(path):
         result["error"] = f"read failed: {exc}"
 
     try:
-        proc = subprocess.run(["cmd", "/c", "cd"], cwd=path, capture_output=True, text=True, timeout=3)  # nosec
+        proc = subprocess.run(
+            ["cmd", "/c", "cd"], cwd=path, capture_output=True, text=True, timeout=3
+        )  # nosec
         result["execute_ok"] = proc.returncode == 0
     except Exception as exc:
         result["error"] = f"execute probe failed: {exc}"
@@ -159,6 +169,7 @@ def _probe_directory_access(path):
             pass
 
     return result
+
 
 def _resolve_trusted_dir(config):
     allowlist = config.get("allowlist_trusted_dirs", [])
@@ -178,7 +189,9 @@ def _resolve_trusted_dir(config):
         try:
             probe = _probe_directory_access(candidate)
             probes[key] = probe
-            if selected is None and all(probe.get(k) for k in ("create_ok", "write_ok", "read_ok", "execute_ok")):
+            if selected is None and all(
+                probe.get(k) for k in ("create_ok", "write_ok", "read_ok", "execute_ok")
+            ):
                 selected = candidate
         except Exception as exc:
             probes[key] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -186,6 +199,7 @@ def _resolve_trusted_dir(config):
     if selected is None:
         selected = BASE_DIR
     return selected, candidates, probes
+
 
 def _sync_config_to_trusted(config_path, trusted_dir):
     trusted_cfg = trusted_dir / "launcher_config.json"
@@ -210,6 +224,7 @@ def _sync_config_to_trusted(config_path, trusted_dir):
             sync_mode = "disabled"
     return trusted_cfg, sync_mode
 
+
 def _set_runtime_base_dir(new_base_dir):
     global BASE_DIR, EMBEDDED_DIR, EMBEDDED_PYTHON, PORTABLEMC_BIN_DIR
     BASE_DIR = Path(new_base_dir)
@@ -217,9 +232,11 @@ def _set_runtime_base_dir(new_base_dir):
     EMBEDDED_PYTHON = EMBEDDED_DIR / "python.exe"
     PORTABLEMC_BIN_DIR = BASE_DIR / "portablemc_bin"
 
+
 def update_launcher_state(**updates):
     LAUNCHER_STATE.update(updates)
     _safe_json_dump(CONFIG_PATH, LAUNCHER_STATE)
+
 
 def initialize_runtime_configuration():
     global LAUNCHER_STATE, ACTIVE_TRUSTED_DIR
@@ -244,26 +261,28 @@ def initialize_runtime_configuration():
     LAUNCHER_STATE["config_sync_mode"] = sync_mode
     _safe_json_dump(CONFIG_PATH, LAUNCHER_STATE)
 
+
 # --- OS and architecture detection (for portablemc binary) ---
 SYSTEM = platform.system().lower()
 MACHINE = platform.machine().lower()
 
 ARCH_MAP = {
-    'x86_64': 'x86_64',
-    'amd64': 'x86_64',
-    'i686': 'i686',
-    'i386': 'i686',
-    'aarch64': 'aarch64',
-    'arm64': 'aarch64',
-    'armv7l': 'arm-gnueabihf',
-    'arm': 'arm-gnueabihf',
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "i686": "i686",
+    "i386": "i686",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+    "armv7l": "arm-gnueabihf",
+    "arm": "arm-gnueabihf",
 }
 
 OS_MAP = {
-    'windows': 'windows',
-    'linux': 'linux',
-    'darwin': 'macos',
+    "windows": "windows",
+    "linux": "linux",
+    "darwin": "macos",
 }
+
 
 def get_portablemc_url():
     """Return the download URL for the native portablemc binary, or None."""
@@ -271,19 +290,20 @@ def get_portablemc_url():
     if not os_name:
         print(f"⚠️ Unsupported OS: {SYSTEM}")
         return None
-    arch = ARCH_MAP.get(MACHINE, 'x86_64')
-    if os_name == 'macos':
-        arch = 'aarch64' if arch == 'aarch64' else 'x86_64'
-    if os_name == 'linux' and arch not in ('arm-gnueabihf',):
-        arch += '-gnu'
+    arch = ARCH_MAP.get(MACHINE, "x86_64")
+    if os_name == "macos":
+        arch = "aarch64" if arch == "aarch64" else "x86_64"
+    if os_name == "linux" and arch not in ("arm-gnueabihf",):
+        arch += "-gnu"
     base = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/"
-    if os_name == 'windows':
+    if os_name == "windows":
         ext = "zip"
         filename = f"portablemc-5.0.2-{os_name}-{arch}-msvc.{ext}"
     else:
         ext = "tar.gz"
         filename = f"portablemc-5.0.2-{os_name}-{arch}.{ext}"
     return base + filename
+
 
 # --- Data functions ---
 def prepare_user_data():
@@ -316,6 +336,7 @@ def prepare_user_data():
         elif dst.exists():
             print(f"ℹ️ {filename} already exists in %LOCALAPPDATA%\\PortableMC")
 
+
 # --- Junction functions ---
 def is_junction(path):
     """Return True if path is a junction (reparse point)."""
@@ -324,6 +345,7 @@ def is_junction(path):
         return (attrs.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) != 0
     except OSError:
         return False
+
 
 def create_junction(source, target):
     """
@@ -336,7 +358,9 @@ def create_junction(source, target):
 
     # Prevent self‑junction
     if source_path == target_path:
-        print(f"⚠️ Source and target are the same ({source_path}); skipping junction creation.")
+        print(
+            f"⚠️ Source and target are the same ({source_path}); skipping junction creation."
+        )
         # Still ensure the target directory exists (as a regular folder)
         target_path.mkdir(parents=True, exist_ok=True)
         return False
@@ -359,7 +383,9 @@ def create_junction(source, target):
     try:
         subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(target_path), str(source_path)],
-            check=True, capture_output=True, text=True
+            check=True,
+            capture_output=True,
+            text=True,
         )  # nosec
         print(f"✅ Junction created: {target_path} -> {source_path}")
         links = LAUNCHER_STATE.get("managed_links", {})
@@ -367,9 +393,12 @@ def create_junction(source, target):
         update_launcher_state(managed_links=links)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ Could not create junction (falling back to regular directory): {e.stderr}")
+        print(
+            f"⚠️ Could not create junction (falling back to regular directory): {e.stderr}"
+        )
         target_path.mkdir(parents=True, exist_ok=True)
         return False
+
 
 def ensure_junctions():
     r"""Ensure mods and resourcepacks directories exist in %LOCALAPPDATA%\PortableMC."""
@@ -380,13 +409,16 @@ def ensure_junctions():
     create_junction(ROOT_DIR / "mods", base_dir / "mods")
     create_junction(ROOT_DIR / "resourcepacks", base_dir / "resourcepacks")
 
+
 def remove_managed_link(target):
     target_path = Path(target)
     try:
         if not target_path.exists() and not target_path.is_symlink():
             return True
         if target_path.is_symlink() or is_junction(target_path):
-            os.rmdir(str(target_path)) if target_path.is_dir() else target_path.unlink(missing_ok=True)
+            os.rmdir(str(target_path)) if target_path.is_dir() else target_path.unlink(
+                missing_ok=True
+            )
         elif target_path.is_dir():
             shutil.rmtree(target_path, ignore_errors=True)
         else:
@@ -395,6 +427,7 @@ def remove_managed_link(target):
     except Exception as exc:
         print(f"⚠️ Failed to remove {target_path}: {exc}")
         return False
+
 
 def run_debug_menu():
     while True:
@@ -415,7 +448,10 @@ def run_debug_menu():
         elif choice == "2":
             remove_managed_link(BASE_DIR / "resourcepacks")
         elif choice == "3":
-            if input("Confirm remove all managed links? (yes/no): ").strip().lower() == "yes":
+            if (
+                input("Confirm remove all managed links? (yes/no): ").strip().lower()
+                == "yes"
+            ):
                 links = list(LAUNCHER_STATE.get("managed_links", {}).keys())
                 for link in links:
                     remove_managed_link(link)
@@ -444,13 +480,17 @@ def run_debug_menu():
         else:
             print("Invalid debug choice.")
 
+
 # --- Download functions ---
 def get_ssl_context():
     """Return an unverified SSL context if ALLOW_INSECURE_SSL is True, else None."""
     if ALLOW_INSECURE_SSL:
-        print("⚠️ WARNING: SSL certificate verification is disabled (ALLOW_INSECURE_SSL=true).")
+        print(
+            "⚠️ WARNING: SSL certificate verification is disabled (ALLOW_INSECURE_SSL=true)."
+        )
         return ssl._create_unverified_context()
     return None
+
 
 def download_file(url, dest_path):
     """Download a file with optional insecure fallback."""
@@ -464,7 +504,7 @@ def download_file(url, dest_path):
             try:
                 context = get_ssl_context()
                 with urllib.request.urlopen(url, context=context) as response:
-                    with open(dest_path, 'wb') as f:
+                    with open(dest_path, "wb") as f:
                         f.write(response.read())
                 return True
             except Exception as e2:
@@ -472,8 +512,11 @@ def download_file(url, dest_path):
                 return False
         else:
             print("❌ Download failed and insecure SSL is disabled.")
-            print("⚠️ If you are in a restricted network, set ALLOW_INSECURE_SSL=true and try again.")
+            print(
+                "⚠️ If you are in a restricted network, set ALLOW_INSECURE_SSL=true and try again."
+            )
             return False
+
 
 # --- Helper functions ---
 def find_msbuild_candidates():
@@ -484,10 +527,21 @@ def find_msbuild_candidates():
     vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
     if os.path.isfile(vswhere):
         try:
-            result = subprocess.run([vswhere, "-latest", "-products", "*", "-find", "MSBuild\\**\\Bin\\MSBuild.exe"],
-                                    capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [
+                    vswhere,
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-find",
+                    "MSBuild\\**\\Bin\\MSBuild.exe",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
+                for line in result.stdout.strip().split("\n"):
                     if line and os.path.isfile(line):
                         candidates.append((line, 100))  # highest priority
         except Exception:
@@ -496,33 +550,76 @@ def find_msbuild_candidates():
     # 2. Hard‑coded candidates with descending priorities
     hardcoded = [
         # Visual Studio 2026 (v18.0)
-        (r"C:\Program Files\Microsoft Visual Studio\2026\Enterprise\MSBuild\Current\Bin\MSBuild.exe", 99),
-        (r"C:\Program Files\Microsoft Visual Studio\2026\Professional\MSBuild\Current\Bin\MSBuild.exe", 99),
-        (r"C:\Program Files\Microsoft Visual Studio\2026\Community\MSBuild\Current\Bin\MSBuild.exe", 99),
-        (r"C:\Program Files\Microsoft Visual Studio\2026\BuildTools\MSBuild\Current\Bin\MSBuild.exe", 99),
-
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2026\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+            99,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2026\Professional\MSBuild\Current\Bin\MSBuild.exe",
+            99,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2026\Community\MSBuild\Current\Bin\MSBuild.exe",
+            99,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2026\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+            99,
+        ),
         # Visual Studio 2022 (v17.0)
-        (r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe", 90),
-        (r"C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe", 90),
-        (r"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe", 90),
-        (r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe", 90),
-
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+            90,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+            90,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+            90,
+        ),
+        (
+            r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+            90,
+        ),
         # Visual Studio 2019 (v16.0)
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\MSBuild.exe", 80),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\MSBuild.exe", 80),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\MSBuild\Current\Bin\MSBuild.exe", 80),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe", 80),
-
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+            80,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\MSBuild.exe",
+            80,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\MSBuild\Current\Bin\MSBuild.exe",
+            80,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+            80,
+        ),
         # Visual Studio 2017 (v15.0)
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\MSBuild\15.0\Bin\MSBuild.exe", 70),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Professional\MSBuild\15.0\Bin\MSBuild.exe", 70),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\MSBuild.exe", 70),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\MSBuild.exe", 70),
-
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\MSBuild\15.0\Bin\MSBuild.exe",
+            70,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Professional\MSBuild\15.0\Bin\MSBuild.exe",
+            70,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\MSBuild\15.0\Bin\MSBuild.exe",
+            70,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\MSBuild.exe",
+            70,
+        ),
         # Standalone Build Tools (v14.0, v12.0)
         (r"C:\Program Files (x86)\MSBuild\14.0\Bin\MSBuild.exe", 60),
         (r"C:\Program Files (x86)\MSBuild\12.0\Bin\MSBuild.exe", 50),
-
         # .NET Framework (64‑bit preferred, then 32‑bit)
         (r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe", 40),
         (r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe", 30),
@@ -541,6 +638,7 @@ def find_msbuild_candidates():
     # Sort by priority descending and return only paths
     sorted_candidates = sorted(unique.items(), key=lambda x: x[1], reverse=True)
     return [path for path, _ in sorted_candidates]
+
 
 def ensure_embedded_python():
     """Download and extract embedded Python to BASE_DIR if missing."""
@@ -561,6 +659,7 @@ def ensure_embedded_python():
     print("✅ Embedded Python ready.")
     return True
 
+
 def fix_pth_file():
     """Enable site-packages in embedded Python's ._pth file."""
     pth_files = list(EMBEDDED_DIR.glob("*._pth"))
@@ -579,11 +678,16 @@ def fix_pth_file():
         print("ℹ️ site-packages already enabled.")
     return True
 
+
 def test_embedded_python():
     """Test if the embedded Python executable can be run."""
     try:
-        result = subprocess.run([str(EMBEDDED_PYTHON), "--version"],
-                                capture_output=True, text=True, timeout=5) # nosec
+        result = subprocess.run(
+            [str(EMBEDDED_PYTHON), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )  # nosec
         if result.returncode == 0:
             print(f"✅ Embedded Python runs: {result.stdout.strip()}")
             return True
@@ -596,6 +700,7 @@ def test_embedded_python():
     except Exception as e:
         print(f"❌ Embedded Python test error: {e}")
         return False
+
 
 def setup_embedded_python():
     """Ensure embedded Python is downloaded, pth fixed, pip installed."""
@@ -613,8 +718,10 @@ def setup_embedded_python():
     env_check["PYTHONPATH"] = ""
     pip_check = subprocess.run(
         [str(EMBEDDED_PYTHON), "-m", "pip", "--version"],
-        env=env_check, capture_output=True, text=True
-    ) # nosec
+        env=env_check,
+        capture_output=True,
+        text=True,
+    )  # nosec
     if pip_check.returncode != 0:
         print("📦 pip not found, installing...")
         if not install_pip(EMBEDDED_PYTHON):
@@ -623,13 +730,17 @@ def setup_embedded_python():
         print(f"✅ pip already installed: {pip_check.stdout.strip()}")
     return True
 
+
 def install_portablemc_via_embedded():
     """Install portablemc in embedded Python and return method."""
     print("📦 Installing portablemc (uv first, pip fallback)...")
-    if not install_packages_with_fallback(["portablemc"], python_exe=EMBEDDED_PYTHON, isolated=True):
+    if not install_packages_with_fallback(
+        ["portablemc"], python_exe=EMBEDDED_PYTHON, isolated=True
+    ):
         print("❌ Failed to install portablemc.")
         return None
     return test_portablemc(EMBEDDED_PYTHON)
+
 
 def download_get_pip():
     """Download get-pip.py into the embedded Python directory."""
@@ -642,13 +753,14 @@ def download_get_pip():
     try:
         context = get_ssl_context()  # from earlier (secure or insecure)
         with urllib.request.urlopen(GET_PIP_URL, context=context) as response:
-            with open(pip_script, 'wb') as out_file:
+            with open(pip_script, "wb") as out_file:
                 out_file.write(response.read())
         print("✅ get-pip.py downloaded successfully.")
     except Exception as e:
         print(f"❌ Failed to download get-pip.py: {e}")
         return None
     return pip_script
+
 
 def run_pip_command(args, isolated=True, python_exe=None):
     """Run a pip command with the given Python executable."""
@@ -659,13 +771,14 @@ def run_pip_command(args, isolated=True, python_exe=None):
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONPATH"] = ""
     cmd = [str(python_exe)] + args
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True) # nosec
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)  # nosec
     if result.returncode != 0:
         print(f"❌ Pip command failed: {' '.join(args)}")
         print(result.stderr)
         return False
     print(result.stdout)
     return True
+
 
 def run_uv_install(packages, python_exe=None, user=False):
     """Try package install using uv. Returns True on success."""
@@ -689,7 +802,10 @@ def run_uv_install(packages, python_exe=None, user=False):
         print(result.stdout.strip())
     return True
 
-def install_packages_with_fallback(packages, python_exe=None, isolated=True, user=False):
+
+def install_packages_with_fallback(
+    packages, python_exe=None, isolated=True, user=False
+):
     """Install packages with uv first, then pip fallback."""
     if python_exe is None:
         python_exe = EMBEDDED_PYTHON
@@ -706,6 +822,7 @@ def install_packages_with_fallback(packages, python_exe=None, isolated=True, use
         update_launcher_state(installer_backend="pip")
     return ok
 
+
 def install_pip(python_exe=None):
     """Install pip into the given Python environment."""
     if python_exe is None:
@@ -717,10 +834,13 @@ def install_pip(python_exe=None):
     env = os.environ.copy()
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = ""
-    cmd = [str(python_exe), str(pip_script),
-           "--trusted-host=files.pythonhosted.org",
-           "--trusted-host=pypi.org"]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True) # nosec
+    cmd = [
+        str(python_exe),
+        str(pip_script),
+        "--trusted-host=files.pythonhosted.org",
+        "--trusted-host=pypi.org",
+    ]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)  # nosec
     if result.returncode != 0:
         print("❌ Failed to install pip.")
         print(result.stderr)
@@ -728,19 +848,25 @@ def install_pip(python_exe=None):
     print("✅ pip installed.")
     return True
 
+
 def install_base_packages(python_exe=None):
     """Install the base packages (flask, etc.) into the given Python."""
     print("📦 Installing base packages...")
     if python_exe is None:
         python_exe = EMBEDDED_PYTHON
-    if not install_packages_with_fallback(["--upgrade", "pip"], isolated=True, python_exe=python_exe):
+    if not install_packages_with_fallback(
+        ["--upgrade", "pip"], isolated=True, python_exe=python_exe
+    ):
         print("⚠️ Pip upgrade failed, continuing anyway.")
     for pkg in BASE_PACKAGES:
         print(f"   Installing {pkg}...")
-        if not install_packages_with_fallback([pkg], isolated=True, python_exe=python_exe):
+        if not install_packages_with_fallback(
+            [pkg], isolated=True, python_exe=python_exe
+        ):
             print(f"❌ Failed to install {pkg}.")
             return False
     return True
+
 
 def get_certifi_path(python_exe=None):
     """Return the path to certifi's CA bundle, or None if certifi not installed."""
@@ -749,15 +875,18 @@ def get_certifi_path(python_exe=None):
     try:
         result = subprocess.run(
             [str(python_exe), "-c", "import certifi; print(certifi.where())"],
-            capture_output=True, text=True, check=True,
-            env={"PYTHONNOUSERSITE": "1"}
-        ) # nosec
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PYTHONNOUSERSITE": "1"},
+        )  # nosec
         path = result.stdout.strip()
         if path and Path(path).exists():
             return path
     except Exception:
         pass
     return None
+
 
 def download_portablemc_binary():
     """Download and extract the native portablemc binary into BASE_DIR."""
@@ -792,6 +921,7 @@ def download_portablemc_binary():
     print(f"✅ portablemc binary extracted to {PORTABLEMC_BIN_DIR}")
     return True
 
+
 def test_portablemc(python_exe=None):
     """Check if portablemc is available (binary or module). Returns 'binary' or 'module' or None."""
     # Try binary first
@@ -803,8 +933,13 @@ def test_portablemc(python_exe=None):
         env = os.environ.copy()
         env["PATH"] = str(PORTABLEMC_BIN_DIR) + os.pathsep + env.get("PATH", "")
         try:
-            result = subprocess.run([str(binary_path), "--help"], env=env,
-                                    capture_output=True, text=True, timeout=5) # nosec
+            result = subprocess.run(
+                [str(binary_path), "--help"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )  # nosec
             if result.returncode == 0:
                 print("✅ portablemc binary works.")
                 return "binary"
@@ -819,13 +954,14 @@ def test_portablemc(python_exe=None):
     env["PYTHONPATH"] = ""
     cmd = [str(python_exe), "-m", "portablemc", "--help"]
     try:
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5) # nosec
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=5)  # nosec
         if result.returncode == 0:
             print("✅ portablemc module works.")
             return "module"
     except subprocess.TimeoutExpired:
         print("⏱️ portablemc module check timed out, assuming not available.")
     return None
+
 
 def ensure_portablemc(python_exe=None):
     """Make portablemc available – try binary, fallback to pip. Returns method string or None."""
@@ -838,11 +974,14 @@ def ensure_portablemc(python_exe=None):
             return method
         print("⚠️ Binary download failed, falling back to pip.")
     print("📦 Installing portablemc (uv first, pip fallback)...")
-    if install_packages_with_fallback(["portablemc"], isolated=True, python_exe=python_exe):
+    if install_packages_with_fallback(
+        ["portablemc"], isolated=True, python_exe=python_exe
+    ):
         method = test_portablemc(python_exe)
         if method:
             return method
     return None
+
 
 def collect_system_details():
     """Collect diagnostic details. Individual probes can fail safely."""
@@ -865,10 +1004,18 @@ def collect_system_details():
         "env_subset": {
             k: os.environ.get(k, "")
             for k in [
-                "USERNAME", "USERDOMAIN", "COMPUTERNAME", "PROCESSOR_ARCHITECTURE",
-                "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "COMSPEC", "PSModulePath"
+                "USERNAME",
+                "USERDOMAIN",
+                "COMPUTERNAME",
+                "PROCESSOR_ARCHITECTURE",
+                "LOCALAPPDATA",
+                "APPDATA",
+                "TEMP",
+                "TMP",
+                "COMSPEC",
+                "PSModulePath",
             ]
-        }
+        },
     }
 
     probes = {
@@ -892,7 +1039,10 @@ def collect_system_details():
             details["probes"][name] = {"error": f"{type(exc).__name__}: {exc}"}
     return details
 
-def write_failure_dump(kind, message, command=None, output=None, returncode=None, exc=None, extra=None):
+
+def write_failure_dump(
+    kind, message, command=None, output=None, returncode=None, exc=None, extra=None
+):
     """Write a resilient failure dump log and return its path (or None)."""
     try:
         logs_dir = PROJECT_LOGS_DIR
@@ -929,7 +1079,9 @@ def write_failure_dump(kind, message, command=None, output=None, returncode=None
 
         lines.append("[Stack Trace]")
         if exc is not None:
-            lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            lines.append(
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            )
         else:
             lines.append("(no Python exception captured)")
 
@@ -947,6 +1099,7 @@ def write_failure_dump(kind, message, command=None, output=None, returncode=None
     except Exception as dump_exc:
         print(f"⚠️ Failed to write diagnostic dump: {dump_exc}")
         return None
+
 
 def run_command_live(cmd, env=None, cwd=None):
     """Run a command, stream output live, and capture it for diagnostics."""
@@ -974,11 +1127,12 @@ def run_command_live(cmd, env=None, cwd=None):
             pass
         raise
 
+
 # --- System Python detection ---
 def get_system_python():
     """Find a system Python 3.x executable, preferring 3.11 or higher.
-       Returns the path to a usable Python interpreter, or None.
-       Priority order: current interpreter, PATH, registry, common install paths.
+    Returns the path to a usable Python interpreter, or None.
+    Priority order: current interpreter, PATH, registry, common install paths.
     """
     candidates = []
     seen = set()
@@ -1019,10 +1173,18 @@ def get_system_python():
 
     # 4. Common install locations
     for ver in PYTHON_VERSIONS:
-        num = ver.replace('.', '')
-        for base in (r"C:\Python{}", r"C:\Program Files\Python{}", r"C:\Program Files (x86)\Python{}"):
+        num = ver.replace(".", "")
+        for base in (
+            r"C:\Python{}",
+            r"C:\Program Files\Python{}",
+            r"C:\Program Files (x86)\Python{}",
+        ):
             add_candidate(base.format(num) + "\\python.exe")
-        user_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Programs" / f"Python{num}"
+        user_dir = (
+            Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+            / "Programs"
+            / f"Python{num}"
+        )
         add_candidate(user_dir / "python.exe")
     add_candidate(r"C:\Windows\Sysnative\python.exe")
     add_candidate(r"C:\Windows\System32\python.exe")
@@ -1031,10 +1193,12 @@ def get_system_python():
     valid = []
     for p in candidates:
         try:
-            result = subprocess.run([str(p), "--version"], capture_output=True, text=True, timeout=2)  # nosec
+            result = subprocess.run(
+                [str(p), "--version"], capture_output=True, text=True, timeout=2
+            )  # nosec
             combined = (result.stdout + result.stderr).strip()
             if result.returncode == 0 and "Python 3" in combined:
-                match = re.search(r'\d+(?:\.\d+)+', combined)
+                match = re.search(r"\d+(?:\.\d+)+", combined)
                 if match:
                     version_str = match.group()
                     valid.append((version_str, p))
@@ -1044,10 +1208,11 @@ def get_system_python():
     if not valid:
         return None
 
-    valid.sort(key=lambda x: tuple(map(int, x[0].split('.'))), reverse=True)
+    valid.sort(key=lambda x: tuple(map(int, x[0].split("."))), reverse=True)
     best = valid[0][1]
     print(f"Selected system Python: {best}")
     return best
+
 
 # --- Launcher functions ---
 def launch_launcher(method, python_exe=None, extra_env=None):
@@ -1095,6 +1260,7 @@ def launch_launcher(method, python_exe=None, extra_env=None):
         print("⏹️ Interrupted by user.")
     return True
 
+
 def run_web_launcher():
     """Attempt to use embedded Python; if blocked, fall back to system Python."""
     print("\n=== Bootstrapping environment for web launcher ===\n")
@@ -1132,10 +1298,14 @@ def run_web_launcher():
     print("📦 Installing required packages with system Python...")
     for pkg in BASE_PACKAGES + ["portablemc"]:
         print(f"   Installing {pkg}...")
-        if not install_packages_with_fallback([pkg], python_exe=sys_python, isolated=False, user=True):
+        if not install_packages_with_fallback(
+            [pkg], python_exe=sys_python, isolated=False, user=True
+        ):
             print(f"❌ Failed to install {pkg}.")
             return False
-        print(f"   ✅ {pkg} installed via {LAUNCHER_STATE.get('installer_backend', 'pip')}.")
+        print(
+            f"   ✅ {pkg} installed via {LAUNCHER_STATE.get('installer_backend', 'pip')}."
+        )
 
     # Test portablemc with system Python
     method = test_portablemc(sys_python)
@@ -1148,9 +1318,10 @@ def run_web_launcher():
     extra_env = {
         "PYTHONUSERBASE": str(launcher_python_dir),
         "PYTHONNOUSERSITE": "0",
-        "PATH": os.environ["PATH"]  # keep the original PATH
+        "PATH": os.environ["PATH"],  # keep the original PATH
     }
     return launch_launcher(method, sys_python, extra_env)
+
 
 def run_msbuild_launcher():
     print("\n=== Launching via MSBuild ===\n")
@@ -1176,7 +1347,7 @@ def run_msbuild_launcher():
             f"/p:JvmOpts={DEFAULT_JVM_OPTS}",
             "/p:UsePowerShell=true",
             "/p:UseCsc=false",
-            "/p:UseVbs=false"
+            "/p:UseVbs=false",
         ]
         print(f"Executing: {' '.join(cmd)}")
         try:
@@ -1191,11 +1362,13 @@ def run_msbuild_launcher():
                     command=cmd,
                     output=output,
                     returncode=result_code,
-                    extra={"candidate": msbuild_path}
+                    extra={"candidate": msbuild_path},
                 )
                 if dump:
                     print(f"📝 Failure dump written: {dump}")
-                print(f"⚠️ MSBuild at {msbuild_path} exited with code {result_code}. Trying next candidate.")
+                print(
+                    f"⚠️ MSBuild at {msbuild_path} exited with code {result_code}. Trying next candidate."
+                )
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -1204,34 +1377,47 @@ def run_msbuild_launcher():
                 message=f"Exception while running MSBuild candidate: {msbuild_path}",
                 command=cmd,
                 exc=e,
-                extra={"candidate": msbuild_path}
+                extra={"candidate": msbuild_path},
             )
             if dump:
                 print(f"📝 Failure dump written: {dump}")
-            print(f"⚠️ Failed to execute MSBuild at {msbuild_path}: {e}. Trying next candidate.")
+            print(
+                f"⚠️ Failed to execute MSBuild at {msbuild_path}: {e}. Trying next candidate."
+            )
 
     print("❌ All MSBuild candidates failed.")
     return False
+
 
 def run_cli_launcher():
     """Launch portablemc in CLI mode using the embedded Python (or system Python fallback)."""
     print("\n=== Bootstrapping environment for CLI launcher ===\n")
     prepare_user_data()
-    failure_context = {"mode": "cli", "server": DEFAULT_SERVER_IP, "username": DEFAULT_USERNAME}
+    failure_context = {
+        "mode": "cli",
+        "server": DEFAULT_SERVER_IP,
+        "username": DEFAULT_USERNAME,
+    }
 
     # Try embedded Python first
     if setup_embedded_python():
         # Install portablemc (and certifi for SSL) into embedded Python
         method = install_portablemc_via_embedded()
         if not method:
-            dump = write_failure_dump("cli", "Embedded Python portablemc install failed.", extra=failure_context)
+            dump = write_failure_dump(
+                "cli",
+                "Embedded Python portablemc install failed.",
+                extra=failure_context,
+            )
             if dump:
                 print(f"📝 Failure dump written: {dump}")
             return False
 
         # Install certifi to get CA bundle
         print("📦 Installing certifi for SSL support...")
-        if not install_packages_with_fallback(["certifi"], isolated=True, python_exe=EMBEDDED_PYTHON):
+        if not install_packages_with_fallback(
+            ["certifi"], isolated=True, python_exe=EMBEDDED_PYTHON
+        ):
             print("⚠️ Failed to install certifi; SSL errors may occur.")
         else:
             print("✅ certifi installed.")
@@ -1245,13 +1431,19 @@ def run_cli_launcher():
         # Build CLI arguments (module syntax)
         jvm_arg_tokens = [arg for arg in DEFAULT_JVM_OPTS.split() if arg.strip()]
         cmd = [
-            str(EMBEDDED_PYTHON), "-m", "portablemc",
-            "--main-dir", ".",
-            "--output", "human-color",
+            str(EMBEDDED_PYTHON),
+            "-m",
+            "portablemc",
+            "--main-dir",
+            ".",
+            "--output",
+            "human-color",
             "start",
-            "--server", DEFAULT_SERVER_IP,
+            "--server",
+            DEFAULT_SERVER_IP,
             "fabric:",
-            "-u", DEFAULT_USERNAME
+            "-u",
+            DEFAULT_USERNAME,
         ]
         for token in reversed(jvm_arg_tokens):
             cmd.insert(9, f"--jvm-arg={token}")
@@ -1275,7 +1467,7 @@ def run_cli_launcher():
                     command=cmd,
                     output=output,
                     returncode=result_code,
-                    extra=failure_context
+                    extra=failure_context,
                 )
                 if dump:
                     print(f"📝 Failure dump written: {dump}")
@@ -1284,7 +1476,13 @@ def run_cli_launcher():
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            dump = write_failure_dump("cli", "Exception during embedded CLI launch.", command=cmd, exc=e, extra=failure_context)
+            dump = write_failure_dump(
+                "cli",
+                "Exception during embedded CLI launch.",
+                command=cmd,
+                exc=e,
+                extra=failure_context,
+            )
             if dump:
                 print(f"📝 Failure dump written: {dump}")
             print(f"❌ CLI launcher exited with error: {e}")
@@ -1294,7 +1492,9 @@ def run_cli_launcher():
     print("\n⚠️ Embedded Python not usable. Trying system Python...")
     sys_python = get_system_python()
     if not sys_python:
-        dump = write_failure_dump("cli", "System Python not found for CLI fallback.", extra=failure_context)
+        dump = write_failure_dump(
+            "cli", "System Python not found for CLI fallback.", extra=failure_context
+        )
         if dump:
             print(f"📝 Failure dump written: {dump}")
         print("❌ No system Python found. Cannot proceed.")
@@ -1311,12 +1511,22 @@ def run_cli_launcher():
 
     # Install portablemc and certifi with system Python
     print("📦 Installing portablemc with system Python...")
-    if not install_packages_with_fallback(["portablemc", "certifi"], python_exe=sys_python, isolated=False, user=True):
+    if not install_packages_with_fallback(
+        ["portablemc", "certifi"], python_exe=sys_python, isolated=False, user=True
+    ):
         dump = write_failure_dump(
             "cli",
             "package install failed in system Python fallback (uv and pip).",
-            command=[str(sys_python), "-m", "pip/uv", "install", "--user", "portablemc", "certifi"],
-            extra=failure_context
+            command=[
+                str(sys_python),
+                "-m",
+                "pip/uv",
+                "install",
+                "--user",
+                "portablemc",
+                "certifi",
+            ],
+            extra=failure_context,
         )
         if dump:
             print(f"📝 Failure dump written: {dump}")
@@ -1325,7 +1535,11 @@ def run_cli_launcher():
 
     method = test_portablemc(sys_python)
     if not method:
-        dump = write_failure_dump("cli", "portablemc unavailable after system Python install.", extra=failure_context)
+        dump = write_failure_dump(
+            "cli",
+            "portablemc unavailable after system Python install.",
+            extra=failure_context,
+        )
         if dump:
             print(f"📝 Failure dump written: {dump}")
         print("❌ portablemc not available after installation.")
@@ -1337,13 +1551,19 @@ def run_cli_launcher():
 
     jvm_arg_tokens = [arg for arg in DEFAULT_JVM_OPTS.split() if arg.strip()]
     cmd = [
-        str(sys_python), "-m", "portablemc",
-        "--main-dir", ".",
-        "--output", "human-color",
+        str(sys_python),
+        "-m",
+        "portablemc",
+        "--main-dir",
+        ".",
+        "--output",
+        "human-color",
         "start",
-        "--server", DEFAULT_SERVER_IP,
+        "--server",
+        DEFAULT_SERVER_IP,
         "fabric:",
-        "-u", DEFAULT_USERNAME
+        "-u",
+        DEFAULT_USERNAME,
     ]
     for token in reversed(jvm_arg_tokens):
         cmd.insert(9, f"--jvm-arg={token}")
@@ -1363,7 +1583,7 @@ def run_cli_launcher():
                 command=cmd,
                 output=output,
                 returncode=result_code,
-                extra=failure_context
+                extra=failure_context,
             )
             if dump:
                 print(f"📝 Failure dump written: {dump}")
@@ -1372,11 +1592,18 @@ def run_cli_launcher():
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        dump = write_failure_dump("cli", "Exception during system Python CLI launch.", command=cmd, exc=e, extra=failure_context)
+        dump = write_failure_dump(
+            "cli",
+            "Exception during system Python CLI launch.",
+            command=cmd,
+            exc=e,
+            extra=failure_context,
+        )
         if dump:
             print(f"📝 Failure dump written: {dump}")
         print(f"❌ CLI launcher exited with error: {e}")
         return False
+
 
 def main():
     initialize_runtime_configuration()
@@ -1409,8 +1636,11 @@ def main():
         print("Invalid choice. Exiting.")
         sys.exit(1)
 
-    update_launcher_state(success=bool(success), last_error="" if success else "launcher returned failure")
+    update_launcher_state(
+        success=bool(success), last_error="" if success else "launcher returned failure"
+    )
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     try:
