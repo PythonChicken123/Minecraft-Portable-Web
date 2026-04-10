@@ -4,6 +4,8 @@ param(
     [string]$JvmOpts
 )
 
+$ErrorActionPreference = "Stop"
+
 # Set compatibility layer to avoid UAC prompts
 $env:__COMPAT_LAYER = "RUNASINVOKER"
 
@@ -74,36 +76,61 @@ if (-not (Test-Path $exePath)) {
 }
 
 # --- Process JVM options and launch ---
-$jvmArgs = $JvmOpts -replace ' ', ','
-$arguments = "--main-dir . start --join-server $ServerIp --jvm-arg=$jvmArgs fabric: -u $Username"
-
-Write-Host "Launching: $exePath $arguments"
-Write-Host "Working directory: $baseDir"
-
-# Ensure the environment variable is set for the child process
-$env:__COMPAT_LAYER = "RUNASINVOKER"
-
-# Launch Minecraft with output redirection
-$tempOut = Join-Path $env:TEMP "portablemc_out.txt"
-$tempErr = Join-Path $env:TEMP "portablemc_err.txt"
-$process = Start-Process -FilePath $exePath -ArgumentList $arguments -WorkingDirectory $baseDir -NoNewWindow -PassThru -RedirectStandardOutput $tempOut -RedirectStandardError $tempErr
-
-$timeout = 30
-$elapsed = 0
-while ($elapsed -lt $timeout) {
-    if ($process.HasExited) { break }
-    Start-Sleep -Seconds 1
-    $elapsed++
+$portablemcArgs = @("--main-dir", ".", "start", "--join-server", $ServerIp)
+$jvmArgList = @()
+if ($JvmOpts) {
+    $jvmArgList = ($JvmOpts -split '\s+') | Where-Object { $_ -and $_.Trim() -ne "" }
 }
+foreach ($jvmArg in $jvmArgList) {
+    # Use --jvm-arg=<value> so values like -Xmx3G are not parsed as options.
+    $portablemcArgs += "--jvm-arg=$jvmArg"
+}
+$portablemcArgs += @("fabric:", "-u", $Username)
 
-if ($process.HasExited) {
-    Write-Host "Process exited with code $($process.ExitCode)"
-    if (Test-Path $tempOut) { Get-Content $tempOut }
-    if (Test-Path $tempErr) { Get-Content $tempErr }
-    Remove-Item $tempOut, $tempErr -Force -ErrorAction SilentlyContinue
-    exit $process.ExitCode
-} else {
-    Write-Host "Process still running after $timeout seconds - detaching."
-    Remove-Item $tempOut, $tempErr -Force -ErrorAction SilentlyContinue
-    exit 0
+Write-Host "Working directory: $baseDir"
+$env:__COMPAT_LAYER = "RUNASINVOKER"
+Push-Location $baseDir
+try {
+    # Try native portablemc.exe first; if blocked or returns non-zero, fall back to Python module.
+    if (Test-Path $exePath) {
+        try {
+            Write-Host "Launching native binary: $exePath $($portablemcArgs -join ' ')"
+            & $exePath @portablemcArgs
+            $nativeExit = $LASTEXITCODE
+            Write-Host "Native exit code: $nativeExit"
+            if ($nativeExit -eq 0) {
+                exit 0
+            }
+            Write-Host "Native launcher returned non-zero exit code ($nativeExit). Trying Python fallback..."
+        } catch {
+            Write-Host "Native portablemc.exe launch failed (likely policy block): $($_.Exception.Message)"
+            Write-Host "Trying Python module fallback..."
+        }
+    }
+
+    $pythonLaunchers = @(
+        @{ File = "py"; Args = @("-3", "-m", "portablemc") },
+        @{ File = "python"; Args = @("-m", "portablemc") },
+        @{ File = "python3"; Args = @("-m", "portablemc") }
+    )
+
+    foreach ($launcher in $pythonLaunchers) {
+        try {
+            $allArgs = @($launcher.Args + $portablemcArgs)
+            Write-Host "Launching Python fallback: $($launcher.File) $($allArgs -join ' ')"
+            & $launcher.File @allArgs
+            $pyExit = $LASTEXITCODE
+            Write-Host "Python launcher '$($launcher.File)' exit code: $pyExit"
+            if ($pyExit -eq 0) {
+                exit 0
+            }
+        } catch {
+            Write-Host "Python launcher '$($launcher.File)' failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "ERROR: All launch methods failed (native and Python fallback)."
+    exit 1
+} finally {
+    Pop-Location
 }
