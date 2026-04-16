@@ -418,6 +418,7 @@ def run_restricted_env_test_harness():
     probes.append(_run_harness_probe("powershell_version", ["powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]))
     probes.append(_run_harness_probe("cscript_help", ["cscript", "//?"]))
     probes.append(_run_harness_probe("csc_help", ["csc", "/help"]))
+    probes.append(_run_harness_probe("systeminfo", ["systeminfo"]))
 
     trusted_dir = ACTIVE_TRUSTED_DIR or BASE_DIR
     probes.append(_run_harness_probe("trusted_dir_probe", ["cmd", "/c", "cd"], cwd=trusted_dir))
@@ -431,6 +432,11 @@ def run_restricted_env_test_harness():
     lines.append(f"base_dir: {BASE_DIR}")
     lines.append(f"active_trusted_dir: {ACTIVE_TRUSTED_DIR}")
     lines.append(f"config_path: {CONFIG_PATH}")
+    lines.append("")
+    lines.append("[effective_env]")
+    lines.append(f"PORTABLEMC_VERSION={os.environ.get('PORTABLEMC_VERSION', PORTABLEMC_VERSION)}")
+    lines.append(f"ALLOW_INSECURE_SSL={os.environ.get('ALLOW_INSECURE_SSL', '')}")
+    lines.append(f"LAUNCHER_VERBOSE={os.environ.get('LAUNCHER_VERBOSE', '')}")
     lines.append("")
     lines.append("[trusted_dir_probes]")
     lines.append(json.dumps(LAUNCHER_STATE.get("trusted_dir_probes", {}), indent=2, sort_keys=True))
@@ -1409,7 +1415,13 @@ def run_cli_launcher():
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            dump = write_failure_dump("cli", "Exception during embedded CLI launch.", command=cmd, exc=e, extra=failure_context)
+            dump = write_failure_dump(
+                "cli",
+                "Exception during embedded CLI launch.",
+                command=used_cmd,
+                exc=e,
+                extra=failure_context,
+            )
             if dump:
                 print(f"📝 Failure dump written: {dump}")
             print(f"❌ CLI launcher exited with error: {e}")
@@ -1497,7 +1509,13 @@ def run_cli_launcher():
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        dump = write_failure_dump("cli", "Exception during system Python CLI launch.", command=cmd, exc=e, extra=failure_context)
+        dump = write_failure_dump(
+            "cli",
+            "Exception during system Python CLI launch.",
+            command=used_cmd,
+            exc=e,
+            extra=failure_context,
+        )
         if dump:
             print(f"📝 Failure dump written: {dump}")
         print(f"❌ CLI launcher exited with error: {e}")
