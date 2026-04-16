@@ -1,33 +1,101 @@
-A Python Script that you can use to launch minecraft via a web browser using Flask for a portable installation using PortableMC with an additional web console.
+# Minecraft Portable Web Launcher
 
-In early development.
-
-Using:
-* C# Code compilation
-* EXE Code compilation
-* Powershell Script Code as fallback
-* VBS Script as fallback
+A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass Group Policy restrictions.
 
 ![Preview](static/preview.jpg)
 
-Execution steps:
-1. Clone this repository
-```cli
+> [!WARNING]
+> This project is for education, launcher portability, and system compatibility testing.
+> Do not use it for bypassing security policy without authorization.
+
+## Features
+
+- **Web interface** with live console (via Flask‑SocketIO)
+- **CLI mode** for direct terminal launching
+- **MSBuild fallback** – compiles a C# loader on‑the‑fly
+- **PowerShell & VBScript fallbacks** for the most restricted environments
+- **Junctions** for `mods` and `resourcepacks` (or regular directories if junctions are blocked)
+- **All data stored in `%LOCALAPPDATA%\PortableMC`** – no clutter in the project folder
+- **Debugging Menu** - hidden option with many debugging options
+
+## Folder Structure & Trusted Dir Strategy
+The launcher uses a hybrid strategy to find a writable/executable directory, prioritizing `%LOCALAPPDATA%\PortableMC`, then falling back to `%TEMP%` or `%PUBLIC%` if necessary.
+
+```text
+Minecraft-Portable-Web/
+├── main.py # Entry point – menu & bootstrapping
+├── scripts/ # Launcher helper scripts
+│ ├── Launcher.targets # MSBuild task
+│ ├── PortableMCLoader.cs # C# loader (compiled if needed)
+│ ├── Launcher.vbs # VBScript fallback
+│ └── Launcher.ps1 # PowerShell fallback
+| └── portablemc.py # Web server (Flask + SocketIO)
+├── static/ # Web UI Assets
+├── mods/ (optional) your mods
+├── resourcepacks/ (optional) your resource packs
+├── options.txt (optional) Minecraft settings
+└── servers.dat (optional) server list
+```
+
+## Requirements
+
+- Windows 10/11
+- Python 3.11+ (or the script will download an embedded Python 3.14).
+- (Optional) MSBuild (comes with .NET Framework 4.8) – used for the C# fallback.
+- (Optional) PowerShell 3.0+ – used as a fallback.
+- (Optional) VBScript support – used as a final fallback.
+
+## TL;DR
+* Test on a **Restricted Environment** by **Group Policy**
+* Port all code to **Rust**
+
+## Getting Started
+
+```bash
 git clone https://github.com/PythonChicken123/Minecraft-Portable-Web/
-```
-2. Switch the branch from main to scripts
-```cli
-git switch scripts
-```
-3. Change into the directory
-```cli
 cd Minecraft-Portable-Web
-```
-4. Execute the script
-```cli
+git switch scripts
 python main.py
 ```
+Then choose a method:
+* `1` – Web launcher (opens `portablemc.py` in your browser)
+* `2` – MSBuild launcher (uses `Launcher.targets`, compiles C# loader in memory)
+* `3` – CLI launcher (runs `portablemc` directly in the terminal)
+* `4` - Debug Menu (shows a hidden debug list)
 
-*An attempt to bypass group policy with potentional fallbacks*
+## How It Works (Bypass Chain)
+The launcher tries the most reliable method first, falling back if blocked:
 
-`OSError: [WinError 1260] This program is blocked by group policy. For more information, contact your system administrator`
+1. **Embedded Python + portablemc** (if the system allows Python execution).
+2. **MSBuild + C# compilation** (uses `csc.exe` to compile a tiny loader).
+3. **PowerShell** (with `-ExecutionPolicy Bypass`).
+4. **VBScript** (via `cscript`).
+
+If a method is blocked, it tries the next. All launchers set __COMPAT_LAYER=RUNASINVOKER to avoid UAC prompts.
+If all methods fail, the script will leave a log dump which you can use to [open an issue](https://github.com/PythonChicken123/Minecraft-Portable-Web/issues)
+
+All downloaded files (embedded Python, portablemc binary) are stored in `%LOCALAPPDATA%\PortableMC`. Junctions are created for `mods` and `resourcepacks` so that files placed in the project folder appear inside the game.
+
+## Development
+* **Linting:** Ruff is used – run `ruff check .` and `ruff format .` before committing.
+* **Workflow:** The GitHub Actions workflow (`.github/workflows/main.yml`) automatically applies Ruff fixes on push/pull requests.
+
+## Troubleshooting
+* `OSError: [WinError 1260]` – Group Policy blocks the method you chose. Try another option.
+* **PowerShell / VBScript errors** – Ensure the scripts have proper permissions. The launcher sets `__COMPAT_LAYER=RUNASINVOKER` to avoid UAC prompts.
+* **SSL errors** – The C# loader and Python scripts force TLS 1.2 and fall back to disabling certificate validation.
+* **Junction creation fails** – The launcher falls back to creating regular directories.
+
+## Found a bug? / Have a suggestion?
+If you encounter any issues or have an idea to improve the launcher, please [open an issue](https://github.com/PythonChicken123/Minecraft-Portable-Web/issues) and use the appropriate template. We welcome contributions!
+
+## License
+MIT
+
+## Libraries Used
+* [PortableMC](https://github.com/mindstorm38/portablemc) – The Heart of The Launcher
+* [Flask](https://flask.palletsprojects.com/) & [Flask‑SocketIO](https://flask-socketio.readthedocs.io/) – Web Interface
+* [ansi2html](https://github.com/ralphbean/ansi2html) & [ansi_up](https://github.com/drudru/ansi_up) – ANSI colour conversion
+* [Socket.io](https://socket.io) - Communication between the web and Flask interfaces
+* [Ruff Linter](https://github.com/astral-sh/ruff) - An extremely fast Python linter
+* [uv](https://github.com/astral-sh/uv) - An extremely fast Python package and project manager, written in Rust.

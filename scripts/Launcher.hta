@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>PortableMC Launcher Test</title>
+<HTA:APPLICATION ID="Test" APPLICATIONNAME="Test" WINDOWSTATE="normal" />
+</head>
+<body>
+<script language="VBScript">
+    ' --- Write to a log file ---
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set shell = CreateObject("WScript.Shell")
+    logFile = shell.ExpandEnvironmentStrings("%TEMP%\hta_debug.log")
+    Set log = fso.CreateTextFile(logFile, True)
+    log.WriteLine "HTA started at " & Now()
+    log.WriteLine "Current directory: " & shell.CurrentDirectory
+    log.WriteLine "Script path: " & Window.Location.PathName
+    log.WriteLine "Arguments: " & Window.Location.Search
+    log.Close
+
+    ' --- Show a message box for immediate feedback ---
+    MsgBox "HTA is running. Check " & logFile & " for details.", vbInformation, "HTA Test"
+
+    ' --- Optionally, try to run portablemc.exe (adjust path as needed) ---
+    ' (You can uncomment and modify this part later)
+    ' exePath = "C:\Users\wave6\Downloads\Compressed\portablemc-5.0.2-windows-x86_64-msvc\portablemc_bin\portablemc.exe"
+    ' If fso.FileExists(exePath) Then
+    '     shell.Run """" & exePath & """ --version", 1, False
+    ' End If
+
+    window.close()
+</script>
+</body>
+</html>

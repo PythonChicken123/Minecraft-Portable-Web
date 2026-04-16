@@ -17,7 +17,7 @@ PortableMCLoader.exe
 *.tmp
 *.log
 
-# User data and game files
+# User data (optional, keep if you want to exclude user‑specific files)
 mods/
 resourcepacks/
 servers.dat
