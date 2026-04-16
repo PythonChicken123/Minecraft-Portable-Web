@@ -1,6 +1,6 @@
 # Minecraft Portable Web Launcher
 
-A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass Group Policy restrictions.
+A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass Group Policy restrictions if required.
 
 ![Preview](static/preview.jpg)
 
