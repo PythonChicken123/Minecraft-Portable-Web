@@ -14,9 +14,12 @@ if (-not $JvmOpts -and $args.Count -gt 0) {
     $JvmOpts = $args[0]
 }
 
-Write-Host "DEBUG: Username = '$Username'"
-Write-Host "DEBUG: ServerIp = '$ServerIp'"
-Write-Host "DEBUG: JvmOpts = '$JvmOpts'"
+$verbose = $env:LAUNCHER_VERBOSE -in @("true", "1", "yes", "on")
+if ($verbose) {
+    Write-Host "DEBUG: Username = '$Username'"
+    Write-Host "DEBUG: ServerIp = '$ServerIp'"
+    Write-Host "DEBUG: JvmOpts = '$JvmOpts'"
+}
 if (-not $JvmOpts) {
     Write-Host "ERROR: JvmOpts is empty. Cannot proceed."
     exit 1
@@ -37,11 +40,13 @@ if (-not (Test-Path $baseDir)) {
 # --- Download portablemc.exe if missing (with optional SSL fallback) ---
 if (-not (Test-Path $exePath)) {
     Write-Host "portablemc.exe not found. Downloading to $binDir..."
-    $url = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/portablemc-5.0.2-windows-x86_64-msvc.zip"
+    $pmcVersion = if ($env:PORTABLEMC_VERSION) { $env:PORTABLEMC_VERSION } else { "5.0.2" }
+    $releaseBase = if ($env:PORTABLEMC_RELEASE_BASE) { $env:PORTABLEMC_RELEASE_BASE } else { "https://github.com/mindstorm38/portablemc/releases/download/v$pmcVersion" }
+    $url = "$releaseBase/portablemc-$pmcVersion-windows-x86_64-msvc.zip"
     $zipPath = Join-Path $baseDir "portablemc.zip"
 
     # Check if insecure SSL is allowed
-    $allowInsecure = $env:ALLOW_INSECURE_SSL -in @("true", "1", "yes")
+    $allowInsecure = $env:ALLOW_INSECURE_SSL -in @("true", "1", "yes", "on")
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

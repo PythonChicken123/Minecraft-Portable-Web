@@ -29,7 +29,11 @@ class Program
         if (!File.Exists(exePath))
         {
             Console.WriteLine("portablemc.exe not found. Downloading...");
-            string url = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/portablemc-5.0.2-windows-x86_64-msvc.zip";
+            string version = Environment.GetEnvironmentVariable("PORTABLEMC_VERSION");
+            if (string.IsNullOrEmpty(version)) version = "5.0.2";
+            string releaseBase = Environment.GetEnvironmentVariable("PORTABLEMC_RELEASE_BASE");
+            if (string.IsNullOrEmpty(releaseBase)) releaseBase = "https://github.com/mindstorm38/portablemc/releases/download/v" + version;
+            string url = releaseBase + "/portablemc-" + version + "-windows-x86_64-msvc.zip";
             string zipPath = Path.Combine(baseDir, "portablemc.zip");
 
             if (!DownloadFile(url, zipPath))
@@ -100,7 +104,7 @@ class Program
     {
         // Manual check for environment variable (C# 5 compatible)
         string envVar = Environment.GetEnvironmentVariable("ALLOW_INSECURE_SSL");
-        bool allowInsecure = envVar != null && (envVar.ToLower() == "true" || envVar == "1" || envVar.ToLower() == "yes");
+        bool allowInsecure = envVar != null && (envVar.ToLower() == "true" || envVar == "1" || envVar.ToLower() == "yes" || envVar.ToLower() == "on");
 
         try
         {

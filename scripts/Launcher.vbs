@@ -36,7 +36,8 @@ Function DownloadFile(url, destPath)
     Set shell = CreateObject("WScript.Shell")
     allowInsecure = LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "true" Or _
                     LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "1" Or _
-                    LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "yes"
+                    LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "yes" Or _
+                    LCase(shell.Environment("PROCESS")("ALLOW_INSECURE_SSL")) = "on"
 
     On Error Resume Next
     Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
@@ -91,7 +92,11 @@ End Sub
 ' --- Main download and extraction ---
 If Not fso.FileExists(exePath) Then
     WScript.Echo "portablemc.exe not found. Downloading..."
-    url = "https://github.com/mindstorm38/portablemc/releases/download/v5.0.2/portablemc-5.0.2-windows-x86_64-msvc.zip"
+    pmcVersion = shell.Environment("PROCESS")("PORTABLEMC_VERSION")
+    If pmcVersion = "" Then pmcVersion = "5.0.2"
+    releaseBase = shell.Environment("PROCESS")("PORTABLEMC_RELEASE_BASE")
+    If releaseBase = "" Then releaseBase = "https://github.com/mindstorm38/portablemc/releases/download/v" & pmcVersion
+    url = releaseBase & "/portablemc-" & pmcVersion & "-windows-x86_64-msvc.zip"
     zipPath = fso.BuildPath(baseDir, "portablemc.zip")
     If Not DownloadFile(url, zipPath) Then
         WScript.Echo "Download failed. Exiting."
