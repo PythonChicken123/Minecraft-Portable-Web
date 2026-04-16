@@ -72,7 +72,7 @@ The launcher tries the most reliable method first, falling back if blocked:
 4. **VBScript** (via `cscript`).
 
 If a method is blocked, it tries the next. All launchers set __COMPAT_LAYER=RUNASINVOKER to avoid UAC prompts.
-If all fails, the script will leave a log dump which you can use to [open an issue](https://github.com/PythonChicken123/Minecraft-Portable-Web/issues)
+If all methods fail, the script will leave a log dump which you can use to [open an issue](https://github.com/PythonChicken123/Minecraft-Portable-Web/issues)
 
 All downloaded files (embedded Python, portablemc binary) are stored in `%LOCALAPPDATA%\PortableMC`. Junctions are created for `mods` and `resourcepacks` so that files placed in the project folder appear inside the game.
 
