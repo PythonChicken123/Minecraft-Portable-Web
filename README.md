@@ -5,7 +5,7 @@ A Python‑based Minecraft launcher that runs in a browser using [Flask](https:/
 ![Preview](static/preview.jpg)
 
 > [!WARNING]
-> This project is for education, launcher portability, and system compatibility testing.
+> Usage of the MSBuild bypass method is for education, launcher portability, and system compatibility testing.
 > Do not use it for bypassing security policy without authorization.
 
 ## Features
