@@ -87,16 +87,9 @@ class Program
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine();
 
-            if (proc.WaitForExit(30000))
-            {
-                Console.WriteLine(string.Format("Process exited with code {0}", proc.ExitCode));
-                Environment.Exit(proc.ExitCode);
-            }
-            else
-            {
-                Console.WriteLine("Process still running – detaching.");
-                Environment.Exit(0);
-            }
+            proc.WaitForExit();
+            Console.WriteLine(string.Format("Process exited with code {0}", proc.ExitCode));
+            Environment.Exit(proc.ExitCode);
         }
     }
 
@@ -134,6 +127,10 @@ class Program
                 {
                     Console.WriteLine(string.Format("Download failed even with SSL disabled: {0}", ex2.Message));
                     return false;
+                }
+                finally
+                {
+                    ServicePointManager.ServerCertificateValidationCallback = null;
                 }
             }
             else
