@@ -46,8 +46,7 @@ Minecraft-Portable-Web/
 - (Optional) VBScript support – used as a final fallback.
 
 ## TL;DR
-* Test on a **Restricted Environment** by **Group Policy**
-* Port all code to **Rust**
+* Load all executables and dlls on the RAM, disk-less, undetectable
 
 ## Getting Started
 
