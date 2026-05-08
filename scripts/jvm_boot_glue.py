@@ -165,6 +165,15 @@ _GMFA_t  = ctypes.WINFUNCTYPE(
     ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.wintypes.DWORD)
 _GMFW_t  = ctypes.WINFUNCTYPE(
     ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.wintypes.DWORD)
+# GetModuleHandleW/A — name in, HMODULE out
+_GMHW_t  = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_wchar_p)
+_GMHA_t  = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_char_p)
+# GetModuleHandleExW/A — flags, name-or-address, out HMODULE*
+# Use c_void_p for the second arg because it's polymorphic (LPCWSTR or address).
+_GMHEW_t = ctypes.WINFUNCTYPE(
+    ctypes.wintypes.BOOL, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+_GMHEA_t = ctypes.WINFUNCTYPE(
+    ctypes.wintypes.BOOL, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
 _CJVM_t  = ctypes.WINFUNCTYPE(
     ctypes.c_int,
     ctypes.POINTER(ctypes.c_void_p),
@@ -504,11 +513,23 @@ class JvmBootGlue:
         self._debug     = debug
         self._fake      = loader.jvm_codebase()
 
-        # IAT entries — populated by _patch_iat
+        # IAT entries — populated by _patch_iat.  Keys ending with the dll
+        # they live in: jpype-side hooks (llw/gpa) target _jpype.pyd; all
+        # others (gmfa, gmfw, gmhw, gmha, gmhew, gmhea, lla, llexw, jgpa,
+        # fl) target jvm.dll's IAT so calls jvm.dll makes into the OS loader
+        # are intercepted before the real loader sees an unknown handle.
         self._iat: dict[str, _IATEntry | None] = {
-            "llw": None, "gpa": None, "gmfa": None, "gmfw": None,
+            "llw": None, "gpa": None,
+            "gmfa": None, "gmfw": None,
+            "gmhw": None, "gmha": None,        # GetModuleHandleW / A
+            "gmhew": None, "gmhea": None,      # GetModuleHandleExW / A
             "lla": None, "llexw": None, "jgpa": None, "fl": None,
         }
+        # jvm.dll memory range — needed for GetModuleHandleEx FROM_ADDRESS.
+        # Populated by _patch_iat once we know the SizeOfImage from the PE
+        # header at self._fake.
+        self._jvm_lo: int = 0
+        self._jvm_hi: int = 0
         # Hook callables — held alive to prevent GC
         self._hooks: dict[str, object] = {}
 
@@ -627,6 +648,104 @@ class JvmBootGlue:
                 return real_fl(hmod)
             self._hooks["fl"] = _FL_t(_fl)
 
+        # ── Module-handle resolution hooks ────────────────────────────────
+        #
+        # Why these matter (the actual cause of "Failed setting boot class path")
+        # ────────────────────────────────────────────────────────────────────
+        # OpenJDK 9+ initialises sun.boot.library.path / java.home with this
+        # idiom inside jvm.dll's os::init_system_properties_values:
+        #
+        #     HMODULE h = nullptr;
+        #     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        #                             (LPCWSTR)&os::init_system_properties_values,
+        #                             &h)) {
+        #         return;                               // ← we hit this!
+        #     }
+        #     GetModuleFileNameW(h, home_path, MAX_PATH);
+        #
+        # The address argument lives inside our in-memory jvm.dll, but the
+        # OS loader has no record of that mapping — GetModuleHandleExW
+        # returns FALSE, the function bails out, java.home is never set,
+        # and HotSpot later panics with "Failed setting boot class path".
+        #
+        # The fix is to intercept GetModuleHandleEx{W,A} (and the simpler
+        # GetModuleHandle{W,A} for "jvm.dll" name lookups) on jvm.dll's
+        # IAT and return our fake handle whenever the query targets the
+        # in-memory image.  The existing GetModuleFileNameW hook then
+        # answers the follow-up call with the on-disk path.
+        FLAG_PIN          = 0x01
+        FLAG_UNCH_REFCOUNT = 0x02
+        FLAG_FROM_ADDRESS = 0x04
+        jvm_lo = self._jvm_lo
+        jvm_hi = self._jvm_hi
+
+        def _is_jvm_name(name: str | None) -> bool:
+            if not name:
+                return False
+            n = name.replace("/", "\\").lower()
+            return n.endswith("jvm.dll") or n == "jvm"
+
+        if self._iat.get("gmhw"):
+            real_gmhw = _GMHW_t(self._iat["gmhw"].original)
+            def _gmhw(name):
+                if _is_jvm_name(name):
+                    return fake
+                return real_gmhw(name)
+            self._hooks["gmhw"] = _GMHW_t(_gmhw)
+
+        if self._iat.get("gmha"):
+            real_gmha = _GMHA_t(self._iat["gmha"].original)
+            def _gmha(name):
+                if name and _is_jvm_name(name.decode("mbcs", "replace")):
+                    return fake
+                return real_gmha(name)
+            self._hooks["gmha"] = _GMHA_t(_gmha)
+
+        if self._iat.get("gmhew"):
+            real_gmhew = _GMHEW_t(self._iat["gmhew"].original)
+            def _gmhew(flags, name_or_addr, out_h):
+                # FROM_ADDRESS branch: name_or_addr is an address.
+                if flags & FLAG_FROM_ADDRESS:
+                    addr = int(name_or_addr or 0)
+                    if jvm_lo <= addr < jvm_hi:
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                else:
+                    # Name branch: name_or_addr is LPCWSTR.
+                    try:
+                        s = ctypes.c_wchar_p(name_or_addr).value if name_or_addr else None
+                    except (ValueError, OSError):
+                        s = None
+                    if _is_jvm_name(s):
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                return real_gmhew(flags, name_or_addr, out_h)
+            self._hooks["gmhew"] = _GMHEW_t(_gmhew)
+
+        if self._iat.get("gmhea"):
+            real_gmhea = _GMHEA_t(self._iat["gmhea"].original)
+            def _gmhea(flags, name_or_addr, out_h):
+                if flags & FLAG_FROM_ADDRESS:
+                    addr = int(name_or_addr or 0)
+                    if jvm_lo <= addr < jvm_hi:
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                else:
+                    try:
+                        s = ctypes.c_char_p(name_or_addr).value if name_or_addr else None
+                        s = s.decode("mbcs", "replace") if s else None
+                    except (ValueError, OSError):
+                        s = None
+                    if _is_jvm_name(s):
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                return real_gmhea(flags, name_or_addr, out_h)
+            self._hooks["gmhea"] = _GMHEA_t(_gmhea)
+
     # ── IAT patch/restore ──────────────────────────────────────────────────
 
     def _patch_iat(self) -> None:
@@ -644,28 +763,76 @@ class JvmBootGlue:
             raise OSError(f"GetModuleHandleW failed for _jpype.pyd: {k32.GetLastError()}")
         log.info("_jpype.pyd base 0x%016x", base)
 
-        self._iat["llw"] = _find_iat(base, "KERNEL32.DLL", "LoadLibraryW",   jp_path)
-        self._iat["gpa"] = _find_iat(base, "KERNEL32.DLL", "GetProcAddress", jp_path)
+        # Helper: try a list of host DLLs (KERNEL32 + the api-set proxies
+        # that modern toolchains sometimes use) and return the first hit.
+        # This handles the case where jvm.dll's IAT imports library-loader
+        # functions via api-ms-win-core-libraryloader-l1-2-0.dll instead of
+        # KERNEL32.DLL — a real-world variation we used to silently miss.
+        _LL_DLLS = (
+            "KERNEL32.DLL",
+            "API-MS-WIN-CORE-LIBRARYLOADER-L1-2-0.DLL",
+            "API-MS-WIN-CORE-LIBRARYLOADER-L1-1-1.DLL",
+            "API-MS-WIN-CORE-LIBRARYLOADER-L1-1-0.DLL",
+        )
+        def _try_iat(mod_base: int, mod_path: str, fn: str) -> _IATEntry | None:
+            for dll in _LL_DLLS:
+                try:
+                    return _find_iat(mod_base, dll, fn, mod_path)
+                except Exception:
+                    continue
+            return None
 
-        # Optional jvm.dll IAT hooks
+        self._iat["llw"] = _try_iat(base, jp_path, "LoadLibraryW") \
+                           or _find_iat(base, "KERNEL32.DLL", "LoadLibraryW", jp_path)
+        self._iat["gpa"] = _try_iat(base, jp_path, "GetProcAddress") \
+                           or _find_iat(base, "KERNEL32.DLL", "GetProcAddress", jp_path)
+
+        # Compute jvm.dll's in-memory range so GetModuleHandleEx FROM_ADDRESS
+        # can be answered without false positives.  SizeOfImage lives at
+        # OptionalHeader+56 (4 bytes, both PE32 and PE32+).  If the read
+        # fails for any reason we fall back to a 64 MiB window — jvm.dll on
+        # OpenJDK 25 is ~16 MiB, so this safely covers the whole image.
         jvm_base = self._fake
+        try:
+            lfa = ctypes.c_int32.from_address(jvm_base + 0x3C).value
+            opt = jvm_base + lfa + 24
+            sz  = ctypes.c_uint32.from_address(opt + 56).value or (64 << 20)
+        except OSError:
+            sz = 64 << 20
+        self._jvm_lo = jvm_base
+        self._jvm_hi = jvm_base + sz
+        log.info("jvm.dll image range [0x%016x, 0x%016x)", self._jvm_lo, self._jvm_hi)
+
+        # Optional jvm.dll IAT hooks.  GetModuleHandle{Ex}{W,A} are the new
+        # entries that fix "Failed setting boot class path" on JDK 9+.
         jvm_path = str(self._loader.jdk_bin / "server" / "jvm.dll")
-        for key, fn in [("gmfa","GetModuleFileNameA"), ("gmfw","GetModuleFileNameW"),
-                        ("lla","LoadLibraryA"), ("llexw","LoadLibraryExW"),
-                        ("jgpa","GetProcAddress"), ("fl","FreeLibrary")]:
-            try:
-                self._iat[key] = _find_iat(jvm_base, "KERNEL32.DLL", fn, jvm_path)
-            except Exception as exc:
-                log.debug("Optional IAT %s skipped: %s", fn, exc)
+        for key, fn in [
+            ("gmfa",  "GetModuleFileNameA"),
+            ("gmfw",  "GetModuleFileNameW"),
+            ("gmhw",  "GetModuleHandleW"),
+            ("gmha",  "GetModuleHandleA"),
+            ("gmhew", "GetModuleHandleExW"),
+            ("gmhea", "GetModuleHandleExA"),
+            ("lla",   "LoadLibraryA"),
+            ("llexw", "LoadLibraryExW"),
+            ("jgpa",  "GetProcAddress"),
+            ("fl",    "FreeLibrary"),
+        ]:
+            ent = _try_iat(jvm_base, jvm_path, fn)
+            if ent is None:
+                log.debug("Optional IAT %s not found in jvm.dll imports", fn)
+            self._iat[key] = ent
 
         self._make_hooks()
 
         self._iat["llw"].patch(ctypes.cast(self._hooks["llw"], ctypes.c_void_p).value)
         self._iat["gpa"].patch(ctypes.cast(self._hooks["gpa"], ctypes.c_void_p).value)
-        for key, hook_key in [("gmfa","gmfa"),("gmfw","gmfw"),("lla","lla"),
-                               ("llexw","llexw"),("jgpa","jgpa"),("fl","fl")]:
-            if self._iat.get(key) and self._hooks.get(hook_key):
-                self._iat[key].patch(ctypes.cast(self._hooks[hook_key], ctypes.c_void_p).value)
+        for key in ("gmfa", "gmfw", "gmhw", "gmha", "gmhew", "gmhea",
+                    "lla", "llexw", "jgpa", "fl"):
+            if self._iat.get(key) and self._hooks.get(key):
+                self._iat[key].patch(
+                    ctypes.cast(self._hooks[key], ctypes.c_void_p).value)
+                log.info("  hooked jvm.dll IAT: %s", key)
 
         log.info("IAT hooks installed")
         _flush_log()
@@ -1438,7 +1605,7 @@ class _DryOutputParser:
         return args if len(args) >= 3 else None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════��═════════════════════════════════════════════════════════════════
 # § 10  Top-level entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
