@@ -201,63 +201,279 @@ class _IATEntry:
         self.patch(self._original)
 
 
+# ── PE parser internals ────────────────────────────────────────────────────
+#
+# A long-standing bug used to live here: the previous manual walk read the
+# Import directory at OptionalHeader offset (120 + 8) = 128, which is actually
+# DataDirectory[2] (Resource), not DataDirectory[1] (Import).  In PE32+,
+# IMAGE_DATA_DIRECTORY entries start at OptionalHeader offset 112 and are
+# 8 bytes each:
+#
+#     [0] Export   VA=112  Size=116
+#     [1] Import   VA=120  Size=124   ← what we actually want
+#     [2] Resource VA=128  Size=132
+#     ...
+#
+# That stray "+ 8" caused us to walk Resource-tree bytes as if they were
+# IMAGE_IMPORT_DESCRIPTORs, dereferencing whatever happened to live there as
+# a "Name RVA" — which is the access violation the user hit:
+#
+#     File ".../jvm_boot_glue.py", line 248, in _find_iat
+#       dname = ctypes.string_at(module_base + nrv).decode(...)
+#     Windows fatal exception: access violation
+#
+# The bug was masked whenever pefile was available (the _jpype.pyd path
+# succeeded that way), but the in-memory jvm.dll mapping is not on the OS
+# loader's list, so pefile silently failed for it and we fell through to the
+# broken manual walk.  Below we (a) fix the offsets, (b) parse the on-disk
+# bytes whenever a real path is available (image headers are not modified by
+# pythonmemorymodule, but disk bytes are guaranteed clean), and (c) bound-
+# check every dereference so a malformed table can no longer crash Python.
+
+
+def _parse_pe_imports(data: bytes) -> dict[tuple[str, bytes], int]:
+    """
+    Parse a PE32+ image (from on-disk bytes) and return a mapping
+
+        {(dll_name_upper, function_name_bytes): IAT slot RVA}
+
+    The returned RVAs are image-relative — add ``module_base`` to obtain the
+    address of the IAT slot inside the loaded module (works for both OS-
+    loaded and pythonmemorymodule-mapped images, because section RVAs are
+    identical in either layout).
+
+    All offsets are validated against the buffer length, so a truncated or
+    malformed file raises a plain ``RuntimeError`` instead of crashing.
+    """
+    if len(data) < 0x40 or data[0:2] != b"MZ":
+        raise RuntimeError("Not a PE: missing MZ header")
+
+    lfa = int.from_bytes(data[0x3C:0x40], "little")
+    if lfa < 0 or lfa + 24 > len(data) or data[lfa:lfa + 4] != b"PE\0\0":
+        raise RuntimeError("Not a PE: missing PE signature")
+
+    opt = lfa + 24
+    if opt + 2 > len(data):
+        raise RuntimeError("Truncated optional header")
+    magic = int.from_bytes(data[opt:opt + 2], "little")
+    if magic != 0x20B:
+        raise RuntimeError(f"Not PE32+ (magic=0x{magic:x})")
+
+    # DataDirectory[1] = Import   →   VA at opt+120, Size at opt+124
+    if opt + 128 > len(data):
+        raise RuntimeError("Truncated data directories")
+    imp_va   = int.from_bytes(data[opt + 120:opt + 124], "little")
+    imp_size = int.from_bytes(data[opt + 124:opt + 128], "little")
+    if not imp_va or not imp_size:
+        raise RuntimeError("No import directory")
+
+    # Section table starts after the optional header.  We need it because the
+    # import directory's RVA must be translated to a file offset to read it
+    # from the on-disk bytes.
+    nsections = int.from_bytes(data[lfa + 6:lfa + 8], "little")
+    sz_opthdr = int.from_bytes(data[lfa + 20:lfa + 22], "little")
+    sec_tbl   = lfa + 24 + sz_opthdr
+    sections: list[tuple[int, int, int, int]] = []   # (va, vsize, raw_off, raw_sz)
+    for i in range(nsections):
+        s = sec_tbl + i * 40
+        if s + 40 > len(data):
+            raise RuntimeError("Truncated section table")
+        vsize  = int.from_bytes(data[s + 8 :s + 12], "little")
+        va     = int.from_bytes(data[s + 12:s + 16], "little")
+        rawsz  = int.from_bytes(data[s + 16:s + 20], "little")
+        rawoff = int.from_bytes(data[s + 20:s + 24], "little")
+        sections.append((va, vsize, rawoff, rawsz))
+
+    def rva_to_off(rva: int) -> int:
+        for va, vsize, rawoff, rawsz in sections:
+            if va <= rva < va + max(vsize, rawsz):
+                return rawoff + (rva - va)
+        raise RuntimeError(f"RVA 0x{rva:x} not in any section")
+
+    def read_cstr(off: int, limit: int = 4096) -> bytes:
+        end = data.find(b"\x00", off, min(off + limit, len(data)))
+        if end < 0:
+            raise RuntimeError("Unterminated C string in PE")
+        return data[off:end]
+
+    out: dict[tuple[str, bytes], int] = {}
+
+    # IMAGE_IMPORT_DESCRIPTOR is 20 bytes:
+    #   DWORD OriginalFirstThunk   (offset  0)
+    #   DWORD TimeDateStamp        (offset  4)
+    #   DWORD ForwarderChain       (offset  8)
+    #   DWORD Name                 (offset 12)
+    #   DWORD FirstThunk           (offset 16)
+    desc_off = rva_to_off(imp_va)
+    end_off  = desc_off + imp_size            # hard upper bound
+    while desc_off + 20 <= min(end_off, len(data)):
+        oft = int.from_bytes(data[desc_off      :desc_off + 4 ], "little")
+        nrv = int.from_bytes(data[desc_off + 12 :desc_off + 16], "little")
+        ft  = int.from_bytes(data[desc_off + 16 :desc_off + 20], "little")
+        if oft == 0 and ft == 0:
+            break        # canonical terminator (Name field is don't-care)
+        try:
+            dll_name = read_cstr(rva_to_off(nrv)).decode("ascii", "replace").upper()
+        except RuntimeError:
+            desc_off += 20
+            continue
+
+        # Walk the Import Name Table (OFT) and record IAT RVA = ft + i*8 for
+        # each named import.  Ordinal imports (high bit set) are skipped.
+        thunk_rva = oft if oft else ft     # bound imports use FT for both
+        try:
+            thunk_off = rva_to_off(thunk_rva)
+        except RuntimeError:
+            desc_off += 20
+            continue
+
+        i = 0
+        while thunk_off + 8 <= len(data):
+            tv = int.from_bytes(data[thunk_off:thunk_off + 8], "little")
+            if tv == 0:
+                break
+            if not (tv >> 63):
+                # Named import — Hint(2) + zero-terminated name follows.
+                try:
+                    ibn_off = rva_to_off(tv & 0x7FFF_FFFF_FFFF_FFFF)
+                    fname   = read_cstr(ibn_off + 2)
+                    out[(dll_name, fname)] = ft + i * _PTR
+                except RuntimeError:
+                    pass
+            i += 1
+            thunk_off += 8
+        desc_off += 20
+
+    return out
+
+
+# Cache: parsed import tables keyed by canonical disk path.  PE imports are
+# immutable for a given binary, so re-reading on every _find_iat() call would
+# be wasteful.
+_PE_IMPORTS_CACHE: dict[str, dict[tuple[str, bytes], int]] = {}
+
+
+def _imports_for_path(module_path: str) -> dict[tuple[str, bytes], int]:
+    key = str(Path(module_path).resolve()).lower()
+    cached = _PE_IMPORTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with open(module_path, "rb") as fh:
+        data = fh.read()
+    imports = _parse_pe_imports(data)
+    _PE_IMPORTS_CACHE[key] = imports
+    return imports
+
+
 def _find_iat(module_base: int, target_dll: str, target_fn: str,
               module_path: str | None = None) -> _IATEntry:
-    """Locate an IAT slot by walking the in-memory PE headers (x64 only)."""
+    """
+    Locate an IAT slot inside ``module_base`` for ``target_dll!target_fn``.
+
+    Strategy
+    ────────
+    1. If ``module_path`` is supplied, parse the on-disk PE bytes (clean, not
+       subject to any in-memory rewriting) and translate the resulting RVA
+       to ``module_base + RVA``.  This is the fast and bullet-proof path
+       and is used for both real OS-loaded modules and the in-memory jvm.dll
+       (whose disk file is always available — we mapped its bytes from
+       there).
+    2. Otherwise, fall back to a bounds-checked in-memory walk.  Every
+       dereference is guarded by VirtualQuery / size-check so a malformed
+       table cannot AV the host process.
+
+    The disk-bytes parse uses the *correct* DataDirectory[1] offsets — see
+    the comment block above ``_parse_pe_imports`` for the historical bug
+    this replaces.
+    """
     tdll = target_dll.upper()
     tfn  = target_fn.encode("ascii")
 
-    # Fast path: pefile
-    if module_path:
+    # ── path 1: parse the on-disk PE bytes ─────────────────────────────────
+    if module_path and os.path.isfile(module_path):
         try:
-            import pythonmemorymodule.pefile as _pef  # type: ignore[import]
-            pe = _pef.PE(module_path, fast_load=False)
-            base = pe.OPTIONAL_HEADER.ImageBase
-            for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
-                if entry.dll.decode("ascii", errors="replace").upper() != tdll:
-                    continue
-                for imp in entry.imports:
-                    if imp.name == tfn:
-                        pe.close()
-                        return _IATEntry(module_base + (imp.address - base))
-            pe.close()
-        except Exception:
-            pass
+            imports = _imports_for_path(module_path)
+            rva = imports.get((tdll, tfn))
+            if rva is not None:
+                return _IATEntry(module_base + rva)
+            raise RuntimeError(f"IAT entry {target_dll}!{target_fn} not in {module_path}")
+        except (OSError, RuntimeError) as exc:
+            log.debug("disk-parse _find_iat(%s, %s) failed: %s — trying memory walk",
+                      target_dll, target_fn, exc)
 
-    # Manual PE walk
-    if ctypes.c_uint16.from_address(module_base).value != 0x5A4D:
-        raise RuntimeError("No MZ header")
-    lfa   = ctypes.c_int32.from_address(module_base + 0x3C).value
-    nt    = module_base + lfa
-    if ctypes.c_uint32.from_address(nt).value != 0x00004550:
-        raise RuntimeError("No PE sig")
-    opt   = nt + 24
-    if ctypes.c_uint16.from_address(opt).value != 0x20B:
-        raise RuntimeError("Not PE32+")
-    imp_va   = ctypes.c_uint32.from_address(opt + 120 + 8 ).value
-    imp_size = ctypes.c_uint32.from_address(opt + 120 + 12).value
+    # ── path 2: bounds-checked in-memory walk (no disk file) ───────────────
+    # Validate that module_base points at a readable PE32+ image first.
+    try:
+        if ctypes.c_uint16.from_address(module_base).value != 0x5A4D:
+            raise RuntimeError("No MZ header")
+        lfa = ctypes.c_int32.from_address(module_base + 0x3C).value
+        if lfa < 0 or lfa > 0x10_0000:
+            raise RuntimeError(f"Implausible e_lfanew: 0x{lfa:x}")
+        nt  = module_base + lfa
+        if ctypes.c_uint32.from_address(nt).value != 0x00004550:
+            raise RuntimeError("No PE sig")
+        opt = nt + 24
+        if ctypes.c_uint16.from_address(opt).value != 0x20B:
+            raise RuntimeError("Not PE32+")
+
+        # CORRECT offsets: DataDirectory[1] = (opt+120, opt+124).  The
+        # historical "+ 8" bug pointed at DataDirectory[2] (Resource).
+        imp_va   = ctypes.c_uint32.from_address(opt + 120).value
+        imp_size = ctypes.c_uint32.from_address(opt + 124).value
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read PE headers at 0x{module_base:x}: {exc}") from exc
+
     if not imp_va or not imp_size:
         raise RuntimeError("No import directory")
-    desc = module_base + imp_va
-    while True:
-        oft = ctypes.c_uint32.from_address(desc     ).value
-        nrv = ctypes.c_uint32.from_address(desc + 12).value
-        ft  = ctypes.c_uint32.from_address(desc + 16).value
-        if not oft and not nrv and not ft:
+
+    # Bound the descriptor walk to the directory size — never read past.
+    desc     = module_base + imp_va
+    desc_end = desc + imp_size
+
+    def _safe_cstr(addr: int, max_len: int = 4096) -> bytes:
+        """string_at with a probe: returns b'' if the page is not readable."""
+        try:
+            # IsBadReadPtr is officially deprecated but still works for our
+            # one-shot validation — and unlike VirtualQuery it doesn't
+            # require composing MEMORY_BASIC_INFORMATION for every call.
+            ctypes.windll.kernel32.IsBadReadPtr.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            ctypes.windll.kernel32.IsBadReadPtr.restype  = ctypes.wintypes.BOOL
+            if ctypes.windll.kernel32.IsBadReadPtr(ctypes.c_void_p(addr), 1):
+                return b""
+            return ctypes.string_at(addr, max_len).split(b"\x00", 1)[0]
+        except OSError:
+            return b""
+
+    while desc + 20 <= desc_end:
+        try:
+            oft = ctypes.c_uint32.from_address(desc      ).value
+            nrv = ctypes.c_uint32.from_address(desc + 12 ).value
+            ft  = ctypes.c_uint32.from_address(desc + 16 ).value
+        except OSError:
             break
-        dname = ctypes.string_at(module_base + nrv).decode("ascii", "replace").upper()
+        if oft == 0 and ft == 0:
+            break
+
+        dname = _safe_cstr(module_base + nrv).decode("ascii", "replace").upper()
         if dname == tdll:
+            thunk = oft or ft        # fall back to FT for bound imports
             i = 0
             while True:
-                tv = ctypes.c_uint64.from_address(module_base + oft + i * _PTR).value
+                try:
+                    tv = ctypes.c_uint64.from_address(module_base + thunk + i * _PTR).value
+                except OSError:
+                    break
                 if not tv:
                     break
                 if not (tv >> 63):
-                    ibn = module_base + (tv & 0x7FFF_FFFF_FFFF_FFFF)
-                    if ctypes.string_at(ibn + 2) == tfn:
+                    name = _safe_cstr(module_base + (tv & 0x7FFF_FFFF_FFFF_FFFF) + 2)
+                    if name == tfn:
                         return _IATEntry(module_base + ft + i * _PTR)
                 i += 1
+                if i > 65536:        # paranoia bound
+                    break
         desc += 20
+
     raise RuntimeError(f"IAT entry {target_dll}!{target_fn} not found")
 
 
