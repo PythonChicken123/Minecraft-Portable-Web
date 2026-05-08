@@ -492,6 +492,241 @@ class JvmBootGlue:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# § 5b  JVM path enforcement — pin java.home / sun.boot.library.path
+#
+# Why this exists
+# ───────────────
+# When jvm.dll is mapped from RAM (option 5 / memory_resident=True), HotSpot's
+# startup code calls GetModuleFileNameA/W on its own HMODULE to derive the
+# JDK home directory.  For a VirtualAlloc'd module that handle is not known
+# to the OS loader and the call returns an empty string.  HotSpot then fails
+# to locate the runtime image at <java.home>/lib/modules and aborts with:
+#
+#     Error occurred during initialization of VM
+#     Could not find or load module image: lib/modules
+#
+# The IAT hooks installed in § 5 cover *some* of HotSpot's GetModuleFileName
+# call sites, but other code paths read -Djava.home / -Dsun.boot.library.path
+# straight from the JavaVMInitArgs.  When portablemc emits a -Djava.home that
+# points at *its own* downloaded JDK (different from the one whose jvm.dll
+# bytes we actually mapped) HotSpot walks into the wrong tree and crashes the
+# same way.
+#
+# Solution
+# ────────
+# Strip every conflicting -D path property from the supplied flag list and
+# replace them with authoritative values pinned to the JDK that owns the
+# in-memory jvm.dll.  A pre-flight check confirms <java.home>/lib/modules
+# exists so we fail fast with a clear error instead of an opaque HotSpot
+# panic.  The same overrides are also applied to the OS-loader path
+# (option 4) — they are harmless there and eliminate "wrong runtime"
+# crashes when the caller's JDK_BIN does not match portablemc's java.home.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# -D system properties whose values must be controlled by us, not by
+# portablemc, the user environment, or whatever launcher script invoked us.
+# Anything starting with one of these prefixes is stripped from the flag
+# list before our authoritative replacements are appended.
+_PINNED_PROPS: tuple[str, ...] = (
+    "-Djava.home=",
+    "-Dsun.boot.library.path=",
+    "-Djava.library.path=",
+    "-Djava.endorsed.dirs=",
+    "-Djava.ext.dirs=",
+)
+
+# JVM-relevant environment variables that silently merge extra command-line
+# flags at startup.  We unset them while booting so they cannot inject
+# conflicting -Djava.home / -Xbootclasspath values behind our back.
+_SCRUBBED_ENV_VARS: tuple[str, ...] = (
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+)
+
+
+def _java_home_from_bin(jdk_bin: Path) -> Path:
+    """
+    Return the JDK installation root for a path that ends in ``bin/``.
+
+    HotSpot's <java.home> is the directory *containing* bin/, not bin/ itself.
+    For an OpenJDK 25 layout that means:
+
+        jdk_bin   = .../jdk-25.0.3+9/bin
+        java.home = .../jdk-25.0.3+9
+    """
+    bin_dir = Path(jdk_bin).resolve()
+    if bin_dir.name.lower() == "bin":
+        return bin_dir.parent
+    # Non-canonical layout: fall back to the parent and let the runtime-image
+    # check below produce the diagnostic.
+    return bin_dir.parent
+
+
+def _verify_runtime_image(java_home: Path, *, fatal: bool) -> bool:
+    """
+    Confirm ``<java.home>/lib/modules`` exists.  This is the JImage file that
+    contains every class in the JDK's modular runtime — without it, HotSpot
+    cannot start.
+
+    Parameters
+    ----------
+    java_home
+        Computed JDK root (parent of bin/).
+    fatal
+        When True (memory-resident mode) raise FileNotFoundError on miss.
+        When False (OS-loader mode) emit a warning and let the caller proceed.
+    """
+    modules_jimage = java_home / "lib" / "modules"
+    if modules_jimage.is_file():
+        log.info("runtime image OK   : %s", modules_jimage)
+        return True
+
+    msg = (
+        f"JDK runtime image not found: {modules_jimage}\n"
+        "  java.home is computed as the parent of jdk_bin and must contain\n"
+        "  lib/modules — the JImage archive HotSpot loads at startup.\n"
+        "  Either jdk_bin does not point at a real JDK 9+ installation,\n"
+        "  or its bin/ directory was renamed/moved."
+    )
+    if fatal:
+        raise FileNotFoundError(msg)
+    log.warning("runtime image MISSING: %s (continuing — OS loader will retry)",
+                modules_jimage)
+    return False
+
+
+def _enforce_jvm_path_overrides(
+    jvm_flags: list[str],
+    jdk_bin: Path,
+    *,
+    require_runtime_image: bool,
+) -> list[str]:
+    """
+    Return a flag list with authoritative -Djava.home, -Dsun.boot.library.path
+    and -Djava.library.path values pinned to the JDK whose jvm.dll bytes were
+    actually mapped (or whose path was passed to jpype.startJVM).  Conflicting
+    -D properties already present in ``jvm_flags`` are removed first.
+
+    The returned list contains the overrides BOTH at the front and at the end:
+      * Front-loading guards against early HotSpot init code that reads the
+        first occurrence.
+      * Tail-duplicating guarantees the override wins under HotSpot's
+        "last -D wins" semantics regardless of how the args are merged
+        further downstream (e.g. by JPype before JNI_CreateJavaVM).
+    """
+    java_home = _java_home_from_bin(jdk_bin)
+    _verify_runtime_image(java_home, fatal=require_runtime_image)
+
+    # Strip every flag whose key is in _PINNED_PROPS — we will replace them.
+    filtered: list[str] = []
+    dropped: list[str] = []
+    for f in jvm_flags:
+        if any(f.startswith(p) for p in _PINNED_PROPS):
+            dropped.append(f)
+        else:
+            filtered.append(f)
+
+    if dropped:
+        log.info("Stripped %d conflicting -D path properties:", len(dropped))
+        for f in dropped:
+            log.info("  ✗  %s", f)
+
+    # Compose -Djava.library.path: prepend jdk_bin to whatever the caller asked
+    # for so the JDK's own native libs win, but keep mod native dirs (lwjgl,
+    # game-specific natives, etc.) reachable for System.loadLibrary().
+    user_libpath = ""
+    for f in jvm_flags:
+        if f.startswith("-Djava.library.path="):
+            user_libpath = f[len("-Djava.library.path="):]
+            break
+
+    libpath_parts: list[str] = [str(jdk_bin)]
+    for p in user_libpath.split(os.pathsep):
+        p = p.strip()
+        if p and p not in libpath_parts:
+            libpath_parts.append(p)
+    java_library_path = os.pathsep.join(libpath_parts)
+
+    overrides = [
+        f"-Djava.home={java_home}",
+        f"-Dsun.boot.library.path={jdk_bin}",
+        f"-Djava.library.path={java_library_path}",
+    ]
+
+    log.info("Pinned -Djava.home              = %s", java_home)
+    log.info("Pinned -Dsun.boot.library.path  = %s", jdk_bin)
+    log.info("Pinned -Djava.library.path      = %s", java_library_path)
+
+    # Front + tail duplication — see docstring.
+    return [*overrides, *filtered, *overrides]
+
+
+def _augment_dll_search_path(jdk_bin: Path) -> list[object]:
+    """
+    Make ``jdk_bin`` and ``jdk_bin/server`` discoverable by the OS loader for
+    the lifetime of the returned cookies.
+
+    Even in memory-resident mode, several auxiliary JDK libraries (jawt.dll,
+    sunmscapi.dll, awt.dll, …) are loaded by the JVM through the regular OS
+    loader after JNI_CreateJavaVM completes.  AddDllDirectory provides a
+    narrowly-scoped search list without polluting PATH.
+
+    Returns
+    -------
+    list[object]
+        AddDllDirectory cookies — keep them alive for the lifetime of the
+        JVM.  When the list is GC'd the directories are removed automatically.
+    """
+    cookies: list[object] = []
+    for d in (jdk_bin, jdk_bin / "server"):
+        if not d.is_dir():
+            continue
+        try:
+            cookies.append(os.add_dll_directory(str(d)))   # type: ignore[attr-defined]
+            log.debug("Added DLL search dir: %s", d)
+        except (FileNotFoundError, OSError, AttributeError) as exc:
+            log.debug("add_dll_directory(%s) failed: %s", d, exc)
+    return cookies
+
+
+class _ScrubJvmEnv:
+    """
+    Context manager that temporarily clears JVM-injecting environment
+    variables (JAVA_TOOL_OPTIONS, _JAVA_OPTIONS, JDK_JAVA_OPTIONS) and pins
+    JAVA_HOME to the directory the launcher chose.
+
+    HotSpot reads these variables at startup and silently merges their
+    contents into its argument list — they can override our pinned -D
+    properties.  Restoring them on exit keeps the change scoped to the
+    JNI_CreateJavaVM call.
+    """
+
+    def __init__(self, java_home: Path) -> None:
+        self._java_home = str(java_home)
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self) -> "_ScrubJvmEnv":
+        # Snapshot + clear injectors.
+        for name in _SCRUBBED_ENV_VARS:
+            self._saved[name] = os.environ.pop(name, None)
+            if self._saved[name]:
+                log.info("Scrubbing %s=%r for JVM boot", name, self._saved[name])
+        # Pin JAVA_HOME so child processes (rare but possible: native tools
+        # spawned by mods) inherit the correct one.
+        self._saved["JAVA_HOME"] = os.environ.get("JAVA_HOME")
+        os.environ["JAVA_HOME"] = self._java_home
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for name, val in self._saved.items():
+            if val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = val
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # § 6  JDK detection helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1035,13 +1270,23 @@ def launch_minecraft(
     )
     jvm_flags, classpath, main_class, game_args = adapter.resolve()
 
-    # Use JDK detected by portablemc if the caller's path had no jvm.dll
+    # Use JDK detected by portablemc if the caller's path had no jvm.dll.
+    #
+    # In memory_resident mode JvmMemoryLoader has already mapped jvm.dll's
+    # bytes from the original jdk_bin — switching paths now would leave the
+    # path properties pointing at a different tree than the one whose code
+    # is running.  Refuse the auto-switch and warn instead.
     if adapter.detected_jdk_bin and not (jdk_bin / "server" / "jvm.dll").exists():
-        jdk_bin = adapter.detected_jdk_bin
-        log.info("Using auto-detected JDK: %s", jdk_bin)
-        if loader:
-            loader.jdk_bin = jdk_bin
-            loader.jdk_server = jdk_bin / "server"
+        if memory_resident:
+            log.warning(
+                "Memory-resident loader is bound to %s; ignoring portablemc's "
+                "auto-detected JDK %s to keep -Djava.home consistent with the "
+                "in-memory jvm.dll image.",
+                jdk_bin, adapter.detected_jdk_bin,
+            )
+        else:
+            jdk_bin = adapter.detected_jdk_bin
+            log.info("Using auto-detected JDK: %s", jdk_bin)
 
     if extra_jvm_flags:
         jvm_flags = list(jvm_flags) + list(extra_jvm_flags)
@@ -1053,31 +1298,50 @@ def launch_minecraft(
     if not classpath:
         raise RuntimeError("portablemc did not provide a classpath")
 
+    # ── Step 2b: pin -Djava.home / -Dsun.boot.library.path / -Djava.library.path
+    #
+    # Run AFTER all flag merges so portablemc, extra_jvm_flags, and any -D
+    # properties from JVM_BOOT_FLAGS-style env vars are normalised together.
+    # In memory-resident mode lib/modules MUST exist or HotSpot will abort
+    # with "Could not find or load module image: lib/modules" — fail fast.
+    jvm_flags = _enforce_jvm_path_overrides(
+        jvm_flags, jdk_bin,
+        require_runtime_image=memory_resident,
+    )
+
+    # Make jdk_bin / jdk_bin/server resolvable for any auxiliary JDK DLL
+    # the JVM loads through the OS loader after JNI_CreateJavaVM (jawt.dll,
+    # sunmscapi.dll, awt.dll, ...).  Cookies stay alive for the run.
+    _dll_search_cookies = _augment_dll_search_path(jdk_bin)  # noqa: F841
+
     log.info(
         "Config: main=%s  jvm_flags=%d  classpath=%d  game_args=%d",
         main_class, len(jvm_flags), len(classpath), len(game_args),
     )
 
     # ── Step 3: boot + launch ─────────────────────────────────────────────
-    if not memory_resident:
-        # Option 4: standard OS-loader JVM path
-        import jpype, jpype.imports  # noqa: F401
-        jvm_dll = str(jdk_bin / "server" / "jvm.dll")
-        log.info("startJVM (OS loader): %s", jvm_dll)
-        jpype.startJVM(
-            jvm_dll, *jvm_flags, classpath=classpath,
-            convertStrings=True, interrupt=True,
-        )
-        log.info("Launching: %s", main_class)
-        jpype.JClass(main_class).main(game_args[:])
-        _wait_non_daemon_threads()
-        return
+    java_home = _java_home_from_bin(jdk_bin)
 
-    # Option 5: memory-resident JVM path
-    JvmBootGlue(
-        loader=loader, jvm_flags=jvm_flags, classpath=classpath,
-        main_class=main_class, game_args=game_args, debug=debug,
-    ).boot()
+    with _ScrubJvmEnv(java_home):
+        if not memory_resident:
+            # Option 4: standard OS-loader JVM path
+            import jpype, jpype.imports  # noqa: F401
+            jvm_dll = str(jdk_bin / "server" / "jvm.dll")
+            log.info("startJVM (OS loader): %s", jvm_dll)
+            jpype.startJVM(
+                jvm_dll, *jvm_flags, classpath=classpath,
+                convertStrings=True, interrupt=True,
+            )
+            log.info("Launching: %s", main_class)
+            jpype.JClass(main_class).main(game_args[:])
+            _wait_non_daemon_threads()
+            return
+
+        # Option 5: memory-resident JVM path
+        JvmBootGlue(
+            loader=loader, jvm_flags=jvm_flags, classpath=classpath,
+            main_class=main_class, game_args=game_args, debug=debug,
+        ).boot()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
