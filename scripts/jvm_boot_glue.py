@@ -182,7 +182,7 @@ _CJVM_t  = ctypes.WINFUNCTYPE(
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════��════════════════════════════════════════════════════════════════
 # § 4  IAT entry — one patchable slot in a PE module's Import Address Table
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -374,38 +374,52 @@ def _imports_for_path(module_path: str) -> dict[tuple[str, bytes], int]:
     return imports
 
 
-def _find_iat(module_base: int, target_dll: str, target_fn: str,
+def _find_iat(module_base: int, target_dll: str | None, target_fn: str,
               module_path: str | None = None) -> _IATEntry:
     """
-    Locate an IAT slot inside ``module_base`` for ``target_dll!target_fn``.
+    Locate an IAT slot inside ``module_base`` for ``target_fn``.
+
+    When ``target_dll`` is ``None`` the function name is matched against
+    *every* imported DLL — this is essential on modern Windows where a
+    single Win32 API can be imported through one of many api-set proxy
+    DLLs (``api-ms-win-core-libraryloader-l1-2-0``, ``-l1-2-1``,
+    ``kernelbase``, ``KERNEL32``, …).  JDK 25's jvm.dll, for example,
+    imports ``GetModuleHandleExW`` through an api-set name our hard-coded
+    list did not cover, which is why the previous run only hooked the
+    ``A`` variants and HotSpot still aborted with "Failed setting boot
+    class path".
 
     Strategy
     ────────
-    1. If ``module_path`` is supplied, parse the on-disk PE bytes (clean, not
-       subject to any in-memory rewriting) and translate the resulting RVA
-       to ``module_base + RVA``.  This is the fast and bullet-proof path
-       and is used for both real OS-loaded modules and the in-memory jvm.dll
-       (whose disk file is always available — we mapped its bytes from
-       there).
-    2. Otherwise, fall back to a bounds-checked in-memory walk.  Every
-       dereference is guarded by VirtualQuery / size-check so a malformed
-       table cannot AV the host process.
+    1. If ``module_path`` is supplied, parse the on-disk PE bytes and
+       translate the matching RVA to ``module_base + RVA``.  Section RVAs
+       are identical between the on-disk image and a pythonmemorymodule
+       mapping, so this works for both OS-loaded modules and the in-memory
+       jvm.dll.
+    2. Otherwise, fall back to a bounds-checked in-memory walk.
 
-    The disk-bytes parse uses the *correct* DataDirectory[1] offsets — see
-    the comment block above ``_parse_pe_imports`` for the historical bug
-    this replaces.
+    The disk-bytes parse uses the correct DataDirectory[1] offsets — see
+    the comment block above ``_parse_pe_imports``.
     """
-    tdll = target_dll.upper()
+    tdll = target_dll.upper() if target_dll else None
     tfn  = target_fn.encode("ascii")
 
     # ── path 1: parse the on-disk PE bytes ─────────────────────────────────
     if module_path and os.path.isfile(module_path):
         try:
             imports = _imports_for_path(module_path)
-            rva = imports.get((tdll, tfn))
+            if tdll is not None:
+                rva = imports.get((tdll, tfn))
+            else:
+                # Wildcard match: pick the first DLL that exports tfn.
+                rva = next(
+                    (r for (d, f), r in imports.items() if f == tfn),
+                    None,
+                )
             if rva is not None:
                 return _IATEntry(module_base + rva)
-            raise RuntimeError(f"IAT entry {target_dll}!{target_fn} not in {module_path}")
+            raise RuntimeError(
+                f"IAT entry {target_dll or '*'}!{target_fn} not in {module_path}")
         except (OSError, RuntimeError) as exc:
             log.debug("disk-parse _find_iat(%s, %s) failed: %s — trying memory walk",
                       target_dll, target_fn, exc)
@@ -464,7 +478,7 @@ def _find_iat(module_base: int, target_dll: str, target_fn: str,
             break
 
         dname = _safe_cstr(module_base + nrv).decode("ascii", "replace").upper()
-        if dname == tdll:
+        if tdll is None or dname == tdll:
             thunk = oft or ft        # fall back to FT for bound imports
             i = 0
             while True:
@@ -763,29 +777,26 @@ class JvmBootGlue:
             raise OSError(f"GetModuleHandleW failed for _jpype.pyd: {k32.GetLastError()}")
         log.info("_jpype.pyd base 0x%016x", base)
 
-        # Helper: try a list of host DLLs (KERNEL32 + the api-set proxies
-        # that modern toolchains sometimes use) and return the first hit.
-        # This handles the case where jvm.dll's IAT imports library-loader
-        # functions via api-ms-win-core-libraryloader-l1-2-0.dll instead of
-        # KERNEL32.DLL — a real-world variation we used to silently miss.
-        _LL_DLLS = (
-            "KERNEL32.DLL",
-            "API-MS-WIN-CORE-LIBRARYLOADER-L1-2-0.DLL",
-            "API-MS-WIN-CORE-LIBRARYLOADER-L1-1-1.DLL",
-            "API-MS-WIN-CORE-LIBRARYLOADER-L1-1-0.DLL",
-        )
+        # Helper: locate an IAT slot for ``fn`` regardless of which host DLL
+        # provides it.  Modern Windows toolchains route Win32 calls through
+        # one of many api-set proxy DLLs (api-ms-win-core-libraryloader-l1-
+        # 2-0, -l1-2-1, kernelbase, KERNEL32, …) and the choice can vary
+        # between JDK builds — JDK 25's jvm.dll for instance imports
+        # GetModuleHandleExW through an api-set name a fixed list won't
+        # cover.  Passing target_dll=None makes _find_iat search every
+        # imported DLL for the function name.
         def _try_iat(mod_base: int, mod_path: str, fn: str) -> _IATEntry | None:
-            for dll in _LL_DLLS:
-                try:
-                    return _find_iat(mod_base, dll, fn, mod_path)
-                except Exception:
-                    continue
-            return None
+            try:
+                return _find_iat(mod_base, None, fn, mod_path)
+            except Exception as exc:
+                log.debug("IAT wildcard lookup %s failed: %s", fn, exc)
+                return None
 
-        self._iat["llw"] = _try_iat(base, jp_path, "LoadLibraryW") \
-                           or _find_iat(base, "KERNEL32.DLL", "LoadLibraryW", jp_path)
-        self._iat["gpa"] = _try_iat(base, jp_path, "GetProcAddress") \
-                           or _find_iat(base, "KERNEL32.DLL", "GetProcAddress", jp_path)
+        self._iat["llw"] = _try_iat(base, jp_path, "LoadLibraryW")
+        self._iat["gpa"] = _try_iat(base, jp_path, "GetProcAddress")
+        if not self._iat["llw"] or not self._iat["gpa"]:
+            raise RuntimeError(
+                "_jpype.pyd does not import LoadLibraryW / GetProcAddress")
 
         # Compute jvm.dll's in-memory range so GetModuleHandleEx FROM_ADDRESS
         # can be answered without false positives.  SizeOfImage lives at
