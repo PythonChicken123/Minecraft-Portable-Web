@@ -165,6 +165,15 @@ _GMFA_t  = ctypes.WINFUNCTYPE(
     ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.wintypes.DWORD)
 _GMFW_t  = ctypes.WINFUNCTYPE(
     ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.wintypes.DWORD)
+# GetModuleHandleW/A — name in, HMODULE out
+_GMHW_t  = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_wchar_p)
+_GMHA_t  = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_char_p)
+# GetModuleHandleExW/A — flags, name-or-address, out HMODULE*
+# Use c_void_p for the second arg because it's polymorphic (LPCWSTR or address).
+_GMHEW_t = ctypes.WINFUNCTYPE(
+    ctypes.wintypes.BOOL, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+_GMHEA_t = ctypes.WINFUNCTYPE(
+    ctypes.wintypes.BOOL, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
 _CJVM_t  = ctypes.WINFUNCTYPE(
     ctypes.c_int,
     ctypes.POINTER(ctypes.c_void_p),
@@ -173,7 +182,7 @@ _CJVM_t  = ctypes.WINFUNCTYPE(
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════��════════════════════════════════════════════════════════════════
 # § 4  IAT entry — one patchable slot in a PE module's Import Address Table
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -201,63 +210,293 @@ class _IATEntry:
         self.patch(self._original)
 
 
-def _find_iat(module_base: int, target_dll: str, target_fn: str,
-              module_path: str | None = None) -> _IATEntry:
-    """Locate an IAT slot by walking the in-memory PE headers (x64 only)."""
-    tdll = target_dll.upper()
-    tfn  = target_fn.encode("ascii")
+# ── PE parser internals ────────────────────────────────────────────────────
+#
+# A long-standing bug used to live here: the previous manual walk read the
+# Import directory at OptionalHeader offset (120 + 8) = 128, which is actually
+# DataDirectory[2] (Resource), not DataDirectory[1] (Import).  In PE32+,
+# IMAGE_DATA_DIRECTORY entries start at OptionalHeader offset 112 and are
+# 8 bytes each:
+#
+#     [0] Export   VA=112  Size=116
+#     [1] Import   VA=120  Size=124   ← what we actually want
+#     [2] Resource VA=128  Size=132
+#     ...
+#
+# That stray "+ 8" caused us to walk Resource-tree bytes as if they were
+# IMAGE_IMPORT_DESCRIPTORs, dereferencing whatever happened to live there as
+# a "Name RVA" — which is the access violation the user hit:
+#
+#     File ".../jvm_boot_glue.py", line 248, in _find_iat
+#       dname = ctypes.string_at(module_base + nrv).decode(...)
+#     Windows fatal exception: access violation
+#
+# The bug was masked whenever pefile was available (the _jpype.pyd path
+# succeeded that way), but the in-memory jvm.dll mapping is not on the OS
+# loader's list, so pefile silently failed for it and we fell through to the
+# broken manual walk.  Below we (a) fix the offsets, (b) parse the on-disk
+# bytes whenever a real path is available (image headers are not modified by
+# pythonmemorymodule, but disk bytes are guaranteed clean), and (c) bound-
+# check every dereference so a malformed table can no longer crash Python.
 
-    # Fast path: pefile
-    if module_path:
-        try:
-            import pythonmemorymodule.pefile as _pef  # type: ignore[import]
-            pe = _pef.PE(module_path, fast_load=False)
-            base = pe.OPTIONAL_HEADER.ImageBase
-            for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
-                if entry.dll.decode("ascii", errors="replace").upper() != tdll:
-                    continue
-                for imp in entry.imports:
-                    if imp.name == tfn:
-                        pe.close()
-                        return _IATEntry(module_base + (imp.address - base))
-            pe.close()
-        except Exception:
-            pass
 
-    # Manual PE walk
-    if ctypes.c_uint16.from_address(module_base).value != 0x5A4D:
-        raise RuntimeError("No MZ header")
-    lfa   = ctypes.c_int32.from_address(module_base + 0x3C).value
-    nt    = module_base + lfa
-    if ctypes.c_uint32.from_address(nt).value != 0x00004550:
-        raise RuntimeError("No PE sig")
-    opt   = nt + 24
-    if ctypes.c_uint16.from_address(opt).value != 0x20B:
-        raise RuntimeError("Not PE32+")
-    imp_va   = ctypes.c_uint32.from_address(opt + 120 + 8 ).value
-    imp_size = ctypes.c_uint32.from_address(opt + 120 + 12).value
+def _parse_pe_imports(data: bytes) -> dict[tuple[str, bytes], int]:
+    """
+    Parse a PE32+ image (from on-disk bytes) and return a mapping
+
+        {(dll_name_upper, function_name_bytes): IAT slot RVA}
+
+    The returned RVAs are image-relative — add ``module_base`` to obtain the
+    address of the IAT slot inside the loaded module (works for both OS-
+    loaded and pythonmemorymodule-mapped images, because section RVAs are
+    identical in either layout).
+
+    All offsets are validated against the buffer length, so a truncated or
+    malformed file raises a plain ``RuntimeError`` instead of crashing.
+    """
+    if len(data) < 0x40 or data[0:2] != b"MZ":
+        raise RuntimeError("Not a PE: missing MZ header")
+
+    lfa = int.from_bytes(data[0x3C:0x40], "little")
+    if lfa < 0 or lfa + 24 > len(data) or data[lfa:lfa + 4] != b"PE\0\0":
+        raise RuntimeError("Not a PE: missing PE signature")
+
+    opt = lfa + 24
+    if opt + 2 > len(data):
+        raise RuntimeError("Truncated optional header")
+    magic = int.from_bytes(data[opt:opt + 2], "little")
+    if magic != 0x20B:
+        raise RuntimeError(f"Not PE32+ (magic=0x{magic:x})")
+
+    # DataDirectory[1] = Import   →   VA at opt+120, Size at opt+124
+    if opt + 128 > len(data):
+        raise RuntimeError("Truncated data directories")
+    imp_va   = int.from_bytes(data[opt + 120:opt + 124], "little")
+    imp_size = int.from_bytes(data[opt + 124:opt + 128], "little")
     if not imp_va or not imp_size:
         raise RuntimeError("No import directory")
-    desc = module_base + imp_va
-    while True:
-        oft = ctypes.c_uint32.from_address(desc     ).value
-        nrv = ctypes.c_uint32.from_address(desc + 12).value
-        ft  = ctypes.c_uint32.from_address(desc + 16).value
-        if not oft and not nrv and not ft:
+
+    # Section table starts after the optional header.  We need it because the
+    # import directory's RVA must be translated to a file offset to read it
+    # from the on-disk bytes.
+    nsections = int.from_bytes(data[lfa + 6:lfa + 8], "little")
+    sz_opthdr = int.from_bytes(data[lfa + 20:lfa + 22], "little")
+    sec_tbl   = lfa + 24 + sz_opthdr
+    sections: list[tuple[int, int, int, int]] = []   # (va, vsize, raw_off, raw_sz)
+    for i in range(nsections):
+        s = sec_tbl + i * 40
+        if s + 40 > len(data):
+            raise RuntimeError("Truncated section table")
+        vsize  = int.from_bytes(data[s + 8 :s + 12], "little")
+        va     = int.from_bytes(data[s + 12:s + 16], "little")
+        rawsz  = int.from_bytes(data[s + 16:s + 20], "little")
+        rawoff = int.from_bytes(data[s + 20:s + 24], "little")
+        sections.append((va, vsize, rawoff, rawsz))
+
+    def rva_to_off(rva: int) -> int:
+        for va, vsize, rawoff, rawsz in sections:
+            if va <= rva < va + max(vsize, rawsz):
+                return rawoff + (rva - va)
+        raise RuntimeError(f"RVA 0x{rva:x} not in any section")
+
+    def read_cstr(off: int, limit: int = 4096) -> bytes:
+        end = data.find(b"\x00", off, min(off + limit, len(data)))
+        if end < 0:
+            raise RuntimeError("Unterminated C string in PE")
+        return data[off:end]
+
+    out: dict[tuple[str, bytes], int] = {}
+
+    # IMAGE_IMPORT_DESCRIPTOR is 20 bytes:
+    #   DWORD OriginalFirstThunk   (offset  0)
+    #   DWORD TimeDateStamp        (offset  4)
+    #   DWORD ForwarderChain       (offset  8)
+    #   DWORD Name                 (offset 12)
+    #   DWORD FirstThunk           (offset 16)
+    desc_off = rva_to_off(imp_va)
+    end_off  = desc_off + imp_size            # hard upper bound
+    while desc_off + 20 <= min(end_off, len(data)):
+        oft = int.from_bytes(data[desc_off      :desc_off + 4 ], "little")
+        nrv = int.from_bytes(data[desc_off + 12 :desc_off + 16], "little")
+        ft  = int.from_bytes(data[desc_off + 16 :desc_off + 20], "little")
+        if oft == 0 and ft == 0:
+            break        # canonical terminator (Name field is don't-care)
+        try:
+            dll_name = read_cstr(rva_to_off(nrv)).decode("ascii", "replace").upper()
+        except RuntimeError:
+            desc_off += 20
+            continue
+
+        # Walk the Import Name Table (OFT) and record IAT RVA = ft + i*8 for
+        # each named import.  Ordinal imports (high bit set) are skipped.
+        thunk_rva = oft if oft else ft     # bound imports use FT for both
+        try:
+            thunk_off = rva_to_off(thunk_rva)
+        except RuntimeError:
+            desc_off += 20
+            continue
+
+        i = 0
+        while thunk_off + 8 <= len(data):
+            tv = int.from_bytes(data[thunk_off:thunk_off + 8], "little")
+            if tv == 0:
+                break
+            if not (tv >> 63):
+                # Named import — Hint(2) + zero-terminated name follows.
+                try:
+                    ibn_off = rva_to_off(tv & 0x7FFF_FFFF_FFFF_FFFF)
+                    fname   = read_cstr(ibn_off + 2)
+                    out[(dll_name, fname)] = ft + i * _PTR
+                except RuntimeError:
+                    pass
+            i += 1
+            thunk_off += 8
+        desc_off += 20
+
+    return out
+
+
+# Cache: parsed import tables keyed by canonical disk path.  PE imports are
+# immutable for a given binary, so re-reading on every _find_iat() call would
+# be wasteful.
+_PE_IMPORTS_CACHE: dict[str, dict[tuple[str, bytes], int]] = {}
+
+
+def _imports_for_path(module_path: str) -> dict[tuple[str, bytes], int]:
+    key = str(Path(module_path).resolve()).lower()
+    cached = _PE_IMPORTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with open(module_path, "rb") as fh:
+        data = fh.read()
+    imports = _parse_pe_imports(data)
+    _PE_IMPORTS_CACHE[key] = imports
+    return imports
+
+
+def _find_iat(module_base: int, target_dll: str | None, target_fn: str,
+              module_path: str | None = None) -> _IATEntry:
+    """
+    Locate an IAT slot inside ``module_base`` for ``target_fn``.
+
+    When ``target_dll`` is ``None`` the function name is matched against
+    *every* imported DLL — this is essential on modern Windows where a
+    single Win32 API can be imported through one of many api-set proxy
+    DLLs (``api-ms-win-core-libraryloader-l1-2-0``, ``-l1-2-1``,
+    ``kernelbase``, ``KERNEL32``, …).  JDK 25's jvm.dll, for example,
+    imports ``GetModuleHandleExW`` through an api-set name our hard-coded
+    list did not cover, which is why the previous run only hooked the
+    ``A`` variants and HotSpot still aborted with "Failed setting boot
+    class path".
+
+    Strategy
+    ────────
+    1. If ``module_path`` is supplied, parse the on-disk PE bytes and
+       translate the matching RVA to ``module_base + RVA``.  Section RVAs
+       are identical between the on-disk image and a pythonmemorymodule
+       mapping, so this works for both OS-loaded modules and the in-memory
+       jvm.dll.
+    2. Otherwise, fall back to a bounds-checked in-memory walk.
+
+    The disk-bytes parse uses the correct DataDirectory[1] offsets — see
+    the comment block above ``_parse_pe_imports``.
+    """
+    tdll = target_dll.upper() if target_dll else None
+    tfn  = target_fn.encode("ascii")
+
+    # ── path 1: parse the on-disk PE bytes ─────────────────────────────────
+    if module_path and os.path.isfile(module_path):
+        try:
+            imports = _imports_for_path(module_path)
+            if tdll is not None:
+                rva = imports.get((tdll, tfn))
+            else:
+                # Wildcard match: pick the first DLL that exports tfn.
+                rva = next(
+                    (r for (d, f), r in imports.items() if f == tfn),
+                    None,
+                )
+            if rva is not None:
+                return _IATEntry(module_base + rva)
+            raise RuntimeError(
+                f"IAT entry {target_dll or '*'}!{target_fn} not in {module_path}")
+        except (OSError, RuntimeError) as exc:
+            log.debug("disk-parse _find_iat(%s, %s) failed: %s — trying memory walk",
+                      target_dll, target_fn, exc)
+
+    # ── path 2: bounds-checked in-memory walk (no disk file) ───────────────
+    # Validate that module_base points at a readable PE32+ image first.
+    try:
+        if ctypes.c_uint16.from_address(module_base).value != 0x5A4D:
+            raise RuntimeError("No MZ header")
+        lfa = ctypes.c_int32.from_address(module_base + 0x3C).value
+        if lfa < 0 or lfa > 0x10_0000:
+            raise RuntimeError(f"Implausible e_lfanew: 0x{lfa:x}")
+        nt  = module_base + lfa
+        if ctypes.c_uint32.from_address(nt).value != 0x00004550:
+            raise RuntimeError("No PE sig")
+        opt = nt + 24
+        if ctypes.c_uint16.from_address(opt).value != 0x20B:
+            raise RuntimeError("Not PE32+")
+
+        # CORRECT offsets: DataDirectory[1] = (opt+120, opt+124).  The
+        # historical "+ 8" bug pointed at DataDirectory[2] (Resource).
+        imp_va   = ctypes.c_uint32.from_address(opt + 120).value
+        imp_size = ctypes.c_uint32.from_address(opt + 124).value
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read PE headers at 0x{module_base:x}: {exc}") from exc
+
+    if not imp_va or not imp_size:
+        raise RuntimeError("No import directory")
+
+    # Bound the descriptor walk to the directory size — never read past.
+    desc     = module_base + imp_va
+    desc_end = desc + imp_size
+
+    def _safe_cstr(addr: int, max_len: int = 4096) -> bytes:
+        """string_at with a probe: returns b'' if the page is not readable."""
+        try:
+            # IsBadReadPtr is officially deprecated but still works for our
+            # one-shot validation — and unlike VirtualQuery it doesn't
+            # require composing MEMORY_BASIC_INFORMATION for every call.
+            ctypes.windll.kernel32.IsBadReadPtr.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            ctypes.windll.kernel32.IsBadReadPtr.restype  = ctypes.wintypes.BOOL
+            if ctypes.windll.kernel32.IsBadReadPtr(ctypes.c_void_p(addr), 1):
+                return b""
+            return ctypes.string_at(addr, max_len).split(b"\x00", 1)[0]
+        except OSError:
+            return b""
+
+    while desc + 20 <= desc_end:
+        try:
+            oft = ctypes.c_uint32.from_address(desc      ).value
+            nrv = ctypes.c_uint32.from_address(desc + 12 ).value
+            ft  = ctypes.c_uint32.from_address(desc + 16 ).value
+        except OSError:
             break
-        dname = ctypes.string_at(module_base + nrv).decode("ascii", "replace").upper()
-        if dname == tdll:
+        if oft == 0 and ft == 0:
+            break
+
+        dname = _safe_cstr(module_base + nrv).decode("ascii", "replace").upper()
+        if tdll is None or dname == tdll:
+            thunk = oft or ft        # fall back to FT for bound imports
             i = 0
             while True:
-                tv = ctypes.c_uint64.from_address(module_base + oft + i * _PTR).value
+                try:
+                    tv = ctypes.c_uint64.from_address(module_base + thunk + i * _PTR).value
+                except OSError:
+                    break
                 if not tv:
                     break
                 if not (tv >> 63):
-                    ibn = module_base + (tv & 0x7FFF_FFFF_FFFF_FFFF)
-                    if ctypes.string_at(ibn + 2) == tfn:
+                    name = _safe_cstr(module_base + (tv & 0x7FFF_FFFF_FFFF_FFFF) + 2)
+                    if name == tfn:
                         return _IATEntry(module_base + ft + i * _PTR)
                 i += 1
+                if i > 65536:        # paranoia bound
+                    break
         desc += 20
+
     raise RuntimeError(f"IAT entry {target_dll}!{target_fn} not found")
 
 
@@ -288,11 +527,23 @@ class JvmBootGlue:
         self._debug     = debug
         self._fake      = loader.jvm_codebase()
 
-        # IAT entries — populated by _patch_iat
+        # IAT entries — populated by _patch_iat.  Keys ending with the dll
+        # they live in: jpype-side hooks (llw/gpa) target _jpype.pyd; all
+        # others (gmfa, gmfw, gmhw, gmha, gmhew, gmhea, lla, llexw, jgpa,
+        # fl) target jvm.dll's IAT so calls jvm.dll makes into the OS loader
+        # are intercepted before the real loader sees an unknown handle.
         self._iat: dict[str, _IATEntry | None] = {
-            "llw": None, "gpa": None, "gmfa": None, "gmfw": None,
+            "llw": None, "gpa": None,
+            "gmfa": None, "gmfw": None,
+            "gmhw": None, "gmha": None,        # GetModuleHandleW / A
+            "gmhew": None, "gmhea": None,      # GetModuleHandleExW / A
             "lla": None, "llexw": None, "jgpa": None, "fl": None,
         }
+        # jvm.dll memory range — needed for GetModuleHandleEx FROM_ADDRESS.
+        # Populated by _patch_iat once we know the SizeOfImage from the PE
+        # header at self._fake.
+        self._jvm_lo: int = 0
+        self._jvm_hi: int = 0
         # Hook callables — held alive to prevent GC
         self._hooks: dict[str, object] = {}
 
@@ -411,6 +662,104 @@ class JvmBootGlue:
                 return real_fl(hmod)
             self._hooks["fl"] = _FL_t(_fl)
 
+        # ── Module-handle resolution hooks ────────────────────────────────
+        #
+        # Why these matter (the actual cause of "Failed setting boot class path")
+        # ────────────────────────────────────────────────────────────────────
+        # OpenJDK 9+ initialises sun.boot.library.path / java.home with this
+        # idiom inside jvm.dll's os::init_system_properties_values:
+        #
+        #     HMODULE h = nullptr;
+        #     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        #                             (LPCWSTR)&os::init_system_properties_values,
+        #                             &h)) {
+        #         return;                               // ← we hit this!
+        #     }
+        #     GetModuleFileNameW(h, home_path, MAX_PATH);
+        #
+        # The address argument lives inside our in-memory jvm.dll, but the
+        # OS loader has no record of that mapping — GetModuleHandleExW
+        # returns FALSE, the function bails out, java.home is never set,
+        # and HotSpot later panics with "Failed setting boot class path".
+        #
+        # The fix is to intercept GetModuleHandleEx{W,A} (and the simpler
+        # GetModuleHandle{W,A} for "jvm.dll" name lookups) on jvm.dll's
+        # IAT and return our fake handle whenever the query targets the
+        # in-memory image.  The existing GetModuleFileNameW hook then
+        # answers the follow-up call with the on-disk path.
+        FLAG_PIN          = 0x01
+        FLAG_UNCH_REFCOUNT = 0x02
+        FLAG_FROM_ADDRESS = 0x04
+        jvm_lo = self._jvm_lo
+        jvm_hi = self._jvm_hi
+
+        def _is_jvm_name(name: str | None) -> bool:
+            if not name:
+                return False
+            n = name.replace("/", "\\").lower()
+            return n.endswith("jvm.dll") or n == "jvm"
+
+        if self._iat.get("gmhw"):
+            real_gmhw = _GMHW_t(self._iat["gmhw"].original)
+            def _gmhw(name):
+                if _is_jvm_name(name):
+                    return fake
+                return real_gmhw(name)
+            self._hooks["gmhw"] = _GMHW_t(_gmhw)
+
+        if self._iat.get("gmha"):
+            real_gmha = _GMHA_t(self._iat["gmha"].original)
+            def _gmha(name):
+                if name and _is_jvm_name(name.decode("mbcs", "replace")):
+                    return fake
+                return real_gmha(name)
+            self._hooks["gmha"] = _GMHA_t(_gmha)
+
+        if self._iat.get("gmhew"):
+            real_gmhew = _GMHEW_t(self._iat["gmhew"].original)
+            def _gmhew(flags, name_or_addr, out_h):
+                # FROM_ADDRESS branch: name_or_addr is an address.
+                if flags & FLAG_FROM_ADDRESS:
+                    addr = int(name_or_addr or 0)
+                    if jvm_lo <= addr < jvm_hi:
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                else:
+                    # Name branch: name_or_addr is LPCWSTR.
+                    try:
+                        s = ctypes.c_wchar_p(name_or_addr).value if name_or_addr else None
+                    except (ValueError, OSError):
+                        s = None
+                    if _is_jvm_name(s):
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                return real_gmhew(flags, name_or_addr, out_h)
+            self._hooks["gmhew"] = _GMHEW_t(_gmhew)
+
+        if self._iat.get("gmhea"):
+            real_gmhea = _GMHEA_t(self._iat["gmhea"].original)
+            def _gmhea(flags, name_or_addr, out_h):
+                if flags & FLAG_FROM_ADDRESS:
+                    addr = int(name_or_addr or 0)
+                    if jvm_lo <= addr < jvm_hi:
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                else:
+                    try:
+                        s = ctypes.c_char_p(name_or_addr).value if name_or_addr else None
+                        s = s.decode("mbcs", "replace") if s else None
+                    except (ValueError, OSError):
+                        s = None
+                    if _is_jvm_name(s):
+                        if out_h:
+                            out_h[0] = ctypes.c_void_p(fake)
+                        return 1
+                return real_gmhea(flags, name_or_addr, out_h)
+            self._hooks["gmhea"] = _GMHEA_t(_gmhea)
+
     # ── IAT patch/restore ──────────────────────────────────────────────────
 
     def _patch_iat(self) -> None:
@@ -428,28 +777,73 @@ class JvmBootGlue:
             raise OSError(f"GetModuleHandleW failed for _jpype.pyd: {k32.GetLastError()}")
         log.info("_jpype.pyd base 0x%016x", base)
 
-        self._iat["llw"] = _find_iat(base, "KERNEL32.DLL", "LoadLibraryW",   jp_path)
-        self._iat["gpa"] = _find_iat(base, "KERNEL32.DLL", "GetProcAddress", jp_path)
-
-        # Optional jvm.dll IAT hooks
-        jvm_base = self._fake
-        jvm_path = str(self._loader.jdk_bin / "server" / "jvm.dll")
-        for key, fn in [("gmfa","GetModuleFileNameA"), ("gmfw","GetModuleFileNameW"),
-                        ("lla","LoadLibraryA"), ("llexw","LoadLibraryExW"),
-                        ("jgpa","GetProcAddress"), ("fl","FreeLibrary")]:
+        # Helper: locate an IAT slot for ``fn`` regardless of which host DLL
+        # provides it.  Modern Windows toolchains route Win32 calls through
+        # one of many api-set proxy DLLs (api-ms-win-core-libraryloader-l1-
+        # 2-0, -l1-2-1, kernelbase, KERNEL32, …) and the choice can vary
+        # between JDK builds — JDK 25's jvm.dll for instance imports
+        # GetModuleHandleExW through an api-set name a fixed list won't
+        # cover.  Passing target_dll=None makes _find_iat search every
+        # imported DLL for the function name.
+        def _try_iat(mod_base: int, mod_path: str, fn: str) -> _IATEntry | None:
             try:
-                self._iat[key] = _find_iat(jvm_base, "KERNEL32.DLL", fn, jvm_path)
+                return _find_iat(mod_base, None, fn, mod_path)
             except Exception as exc:
-                log.debug("Optional IAT %s skipped: %s", fn, exc)
+                log.debug("IAT wildcard lookup %s failed: %s", fn, exc)
+                return None
+
+        self._iat["llw"] = _try_iat(base, jp_path, "LoadLibraryW")
+        self._iat["gpa"] = _try_iat(base, jp_path, "GetProcAddress")
+        if not self._iat["llw"] or not self._iat["gpa"]:
+            raise RuntimeError(
+                "_jpype.pyd does not import LoadLibraryW / GetProcAddress")
+
+        # Compute jvm.dll's in-memory range so GetModuleHandleEx FROM_ADDRESS
+        # can be answered without false positives.  SizeOfImage lives at
+        # OptionalHeader+56 (4 bytes, both PE32 and PE32+).  If the read
+        # fails for any reason we fall back to a 64 MiB window — jvm.dll on
+        # OpenJDK 25 is ~16 MiB, so this safely covers the whole image.
+        jvm_base = self._fake
+        try:
+            lfa = ctypes.c_int32.from_address(jvm_base + 0x3C).value
+            opt = jvm_base + lfa + 24
+            sz  = ctypes.c_uint32.from_address(opt + 56).value or (64 << 20)
+        except OSError:
+            sz = 64 << 20
+        self._jvm_lo = jvm_base
+        self._jvm_hi = jvm_base + sz
+        log.info("jvm.dll image range [0x%016x, 0x%016x)", self._jvm_lo, self._jvm_hi)
+
+        # Optional jvm.dll IAT hooks.  GetModuleHandle{Ex}{W,A} are the new
+        # entries that fix "Failed setting boot class path" on JDK 9+.
+        jvm_path = str(self._loader.jdk_bin / "server" / "jvm.dll")
+        for key, fn in [
+            ("gmfa",  "GetModuleFileNameA"),
+            ("gmfw",  "GetModuleFileNameW"),
+            ("gmhw",  "GetModuleHandleW"),
+            ("gmha",  "GetModuleHandleA"),
+            ("gmhew", "GetModuleHandleExW"),
+            ("gmhea", "GetModuleHandleExA"),
+            ("lla",   "LoadLibraryA"),
+            ("llexw", "LoadLibraryExW"),
+            ("jgpa",  "GetProcAddress"),
+            ("fl",    "FreeLibrary"),
+        ]:
+            ent = _try_iat(jvm_base, jvm_path, fn)
+            if ent is None:
+                log.debug("Optional IAT %s not found in jvm.dll imports", fn)
+            self._iat[key] = ent
 
         self._make_hooks()
 
         self._iat["llw"].patch(ctypes.cast(self._hooks["llw"], ctypes.c_void_p).value)
         self._iat["gpa"].patch(ctypes.cast(self._hooks["gpa"], ctypes.c_void_p).value)
-        for key, hook_key in [("gmfa","gmfa"),("gmfw","gmfw"),("lla","lla"),
-                               ("llexw","llexw"),("jgpa","jgpa"),("fl","fl")]:
-            if self._iat.get(key) and self._hooks.get(hook_key):
-                self._iat[key].patch(ctypes.cast(self._hooks[hook_key], ctypes.c_void_p).value)
+        for key in ("gmfa", "gmfw", "gmhw", "gmha", "gmhew", "gmhea",
+                    "lla", "llexw", "jgpa", "fl"):
+            if self._iat.get(key) and self._hooks.get(key):
+                self._iat[key].patch(
+                    ctypes.cast(self._hooks[key], ctypes.c_void_p).value)
+                log.info("  hooked jvm.dll IAT: %s", key)
 
         log.info("IAT hooks installed")
         _flush_log()
@@ -489,6 +883,241 @@ class JvmBootGlue:
         jpype.JClass(self._main).main(self._gargs[:])
         _wait_non_daemon_threads()
         log.info("=== JvmBootGlue.boot() done ===")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# § 5b  JVM path enforcement — pin java.home / sun.boot.library.path
+#
+# Why this exists
+# ───────────────
+# When jvm.dll is mapped from RAM (option 5 / memory_resident=True), HotSpot's
+# startup code calls GetModuleFileNameA/W on its own HMODULE to derive the
+# JDK home directory.  For a VirtualAlloc'd module that handle is not known
+# to the OS loader and the call returns an empty string.  HotSpot then fails
+# to locate the runtime image at <java.home>/lib/modules and aborts with:
+#
+#     Error occurred during initialization of VM
+#     Could not find or load module image: lib/modules
+#
+# The IAT hooks installed in § 5 cover *some* of HotSpot's GetModuleFileName
+# call sites, but other code paths read -Djava.home / -Dsun.boot.library.path
+# straight from the JavaVMInitArgs.  When portablemc emits a -Djava.home that
+# points at *its own* downloaded JDK (different from the one whose jvm.dll
+# bytes we actually mapped) HotSpot walks into the wrong tree and crashes the
+# same way.
+#
+# Solution
+# ────────
+# Strip every conflicting -D path property from the supplied flag list and
+# replace them with authoritative values pinned to the JDK that owns the
+# in-memory jvm.dll.  A pre-flight check confirms <java.home>/lib/modules
+# exists so we fail fast with a clear error instead of an opaque HotSpot
+# panic.  The same overrides are also applied to the OS-loader path
+# (option 4) — they are harmless there and eliminate "wrong runtime"
+# crashes when the caller's JDK_BIN does not match portablemc's java.home.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# -D system properties whose values must be controlled by us, not by
+# portablemc, the user environment, or whatever launcher script invoked us.
+# Anything starting with one of these prefixes is stripped from the flag
+# list before our authoritative replacements are appended.
+_PINNED_PROPS: tuple[str, ...] = (
+    "-Djava.home=",
+    "-Dsun.boot.library.path=",
+    "-Djava.library.path=",
+    "-Djava.endorsed.dirs=",
+    "-Djava.ext.dirs=",
+)
+
+# JVM-relevant environment variables that silently merge extra command-line
+# flags at startup.  We unset them while booting so they cannot inject
+# conflicting -Djava.home / -Xbootclasspath values behind our back.
+_SCRUBBED_ENV_VARS: tuple[str, ...] = (
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+)
+
+
+def _java_home_from_bin(jdk_bin: Path) -> Path:
+    """
+    Return the JDK installation root for a path that ends in ``bin/``.
+
+    HotSpot's <java.home> is the directory *containing* bin/, not bin/ itself.
+    For an OpenJDK 25 layout that means:
+
+        jdk_bin   = .../jdk-25.0.3+9/bin
+        java.home = .../jdk-25.0.3+9
+    """
+    bin_dir = Path(jdk_bin).resolve()
+    if bin_dir.name.lower() == "bin":
+        return bin_dir.parent
+    # Non-canonical layout: fall back to the parent and let the runtime-image
+    # check below produce the diagnostic.
+    return bin_dir.parent
+
+
+def _verify_runtime_image(java_home: Path, *, fatal: bool) -> bool:
+    """
+    Confirm ``<java.home>/lib/modules`` exists.  This is the JImage file that
+    contains every class in the JDK's modular runtime — without it, HotSpot
+    cannot start.
+
+    Parameters
+    ----------
+    java_home
+        Computed JDK root (parent of bin/).
+    fatal
+        When True (memory-resident mode) raise FileNotFoundError on miss.
+        When False (OS-loader mode) emit a warning and let the caller proceed.
+    """
+    modules_jimage = java_home / "lib" / "modules"
+    if modules_jimage.is_file():
+        log.info("runtime image OK   : %s", modules_jimage)
+        return True
+
+    msg = (
+        f"JDK runtime image not found: {modules_jimage}\n"
+        "  java.home is computed as the parent of jdk_bin and must contain\n"
+        "  lib/modules — the JImage archive HotSpot loads at startup.\n"
+        "  Either jdk_bin does not point at a real JDK 9+ installation,\n"
+        "  or its bin/ directory was renamed/moved."
+    )
+    if fatal:
+        raise FileNotFoundError(msg)
+    log.warning("runtime image MISSING: %s (continuing — OS loader will retry)",
+                modules_jimage)
+    return False
+
+
+def _enforce_jvm_path_overrides(
+    jvm_flags: list[str],
+    jdk_bin: Path,
+    *,
+    require_runtime_image: bool,
+) -> list[str]:
+    """
+    Return a flag list with authoritative -Djava.home, -Dsun.boot.library.path
+    and -Djava.library.path values pinned to the JDK whose jvm.dll bytes were
+    actually mapped (or whose path was passed to jpype.startJVM).  Conflicting
+    -D properties already present in ``jvm_flags`` are removed first.
+
+    The returned list contains the overrides BOTH at the front and at the end:
+      * Front-loading guards against early HotSpot init code that reads the
+        first occurrence.
+      * Tail-duplicating guarantees the override wins under HotSpot's
+        "last -D wins" semantics regardless of how the args are merged
+        further downstream (e.g. by JPype before JNI_CreateJavaVM).
+    """
+    java_home = _java_home_from_bin(jdk_bin)
+    _verify_runtime_image(java_home, fatal=require_runtime_image)
+
+    # Strip every flag whose key is in _PINNED_PROPS — we will replace them.
+    filtered: list[str] = []
+    dropped: list[str] = []
+    for f in jvm_flags:
+        if any(f.startswith(p) for p in _PINNED_PROPS):
+            dropped.append(f)
+        else:
+            filtered.append(f)
+
+    if dropped:
+        log.info("Stripped %d conflicting -D path properties:", len(dropped))
+        for f in dropped:
+            log.info("  ✗  %s", f)
+
+    # Compose -Djava.library.path: prepend jdk_bin to whatever the caller asked
+    # for so the JDK's own native libs win, but keep mod native dirs (lwjgl,
+    # game-specific natives, etc.) reachable for System.loadLibrary().
+    user_libpath = ""
+    for f in jvm_flags:
+        if f.startswith("-Djava.library.path="):
+            user_libpath = f[len("-Djava.library.path="):]
+            break
+
+    libpath_parts: list[str] = [str(jdk_bin)]
+    for p in user_libpath.split(os.pathsep):
+        p = p.strip()
+        if p and p not in libpath_parts:
+            libpath_parts.append(p)
+    java_library_path = os.pathsep.join(libpath_parts)
+
+    overrides = [
+        f"-Djava.home={java_home}",
+        f"-Dsun.boot.library.path={jdk_bin}",
+        f"-Djava.library.path={java_library_path}",
+    ]
+
+    log.info("Pinned -Djava.home              = %s", java_home)
+    log.info("Pinned -Dsun.boot.library.path  = %s", jdk_bin)
+    log.info("Pinned -Djava.library.path      = %s", java_library_path)
+
+    # Front + tail duplication — see docstring.
+    return [*overrides, *filtered, *overrides]
+
+
+def _augment_dll_search_path(jdk_bin: Path) -> list[object]:
+    """
+    Make ``jdk_bin`` and ``jdk_bin/server`` discoverable by the OS loader for
+    the lifetime of the returned cookies.
+
+    Even in memory-resident mode, several auxiliary JDK libraries (jawt.dll,
+    sunmscapi.dll, awt.dll, …) are loaded by the JVM through the regular OS
+    loader after JNI_CreateJavaVM completes.  AddDllDirectory provides a
+    narrowly-scoped search list without polluting PATH.
+
+    Returns
+    -------
+    list[object]
+        AddDllDirectory cookies — keep them alive for the lifetime of the
+        JVM.  When the list is GC'd the directories are removed automatically.
+    """
+    cookies: list[object] = []
+    for d in (jdk_bin, jdk_bin / "server"):
+        if not d.is_dir():
+            continue
+        try:
+            cookies.append(os.add_dll_directory(str(d)))   # type: ignore[attr-defined]
+            log.debug("Added DLL search dir: %s", d)
+        except (FileNotFoundError, OSError, AttributeError) as exc:
+            log.debug("add_dll_directory(%s) failed: %s", d, exc)
+    return cookies
+
+
+class _ScrubJvmEnv:
+    """
+    Context manager that temporarily clears JVM-injecting environment
+    variables (JAVA_TOOL_OPTIONS, _JAVA_OPTIONS, JDK_JAVA_OPTIONS) and pins
+    JAVA_HOME to the directory the launcher chose.
+
+    HotSpot reads these variables at startup and silently merges their
+    contents into its argument list — they can override our pinned -D
+    properties.  Restoring them on exit keeps the change scoped to the
+    JNI_CreateJavaVM call.
+    """
+
+    def __init__(self, java_home: Path) -> None:
+        self._java_home = str(java_home)
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self) -> "_ScrubJvmEnv":
+        # Snapshot + clear injectors.
+        for name in _SCRUBBED_ENV_VARS:
+            self._saved[name] = os.environ.pop(name, None)
+            if self._saved[name]:
+                log.info("Scrubbing %s=%r for JVM boot", name, self._saved[name])
+        # Pin JAVA_HOME so child processes (rare but possible: native tools
+        # spawned by mods) inherit the correct one.
+        self._saved["JAVA_HOME"] = os.environ.get("JAVA_HOME")
+        os.environ["JAVA_HOME"] = self._java_home
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for name, val in self._saved.items():
+            if val is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = val
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -987,7 +1616,7 @@ class _DryOutputParser:
         return args if len(args) >= 3 else None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════��═════════════════════════════════════════════════════════════════
 # § 10  Top-level entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1035,13 +1664,23 @@ def launch_minecraft(
     )
     jvm_flags, classpath, main_class, game_args = adapter.resolve()
 
-    # Use JDK detected by portablemc if the caller's path had no jvm.dll
+    # Use JDK detected by portablemc if the caller's path had no jvm.dll.
+    #
+    # In memory_resident mode JvmMemoryLoader has already mapped jvm.dll's
+    # bytes from the original jdk_bin — switching paths now would leave the
+    # path properties pointing at a different tree than the one whose code
+    # is running.  Refuse the auto-switch and warn instead.
     if adapter.detected_jdk_bin and not (jdk_bin / "server" / "jvm.dll").exists():
-        jdk_bin = adapter.detected_jdk_bin
-        log.info("Using auto-detected JDK: %s", jdk_bin)
-        if loader:
-            loader.jdk_bin = jdk_bin
-            loader.jdk_server = jdk_bin / "server"
+        if memory_resident:
+            log.warning(
+                "Memory-resident loader is bound to %s; ignoring portablemc's "
+                "auto-detected JDK %s to keep -Djava.home consistent with the "
+                "in-memory jvm.dll image.",
+                jdk_bin, adapter.detected_jdk_bin,
+            )
+        else:
+            jdk_bin = adapter.detected_jdk_bin
+            log.info("Using auto-detected JDK: %s", jdk_bin)
 
     if extra_jvm_flags:
         jvm_flags = list(jvm_flags) + list(extra_jvm_flags)
@@ -1053,31 +1692,50 @@ def launch_minecraft(
     if not classpath:
         raise RuntimeError("portablemc did not provide a classpath")
 
+    # ── Step 2b: pin -Djava.home / -Dsun.boot.library.path / -Djava.library.path
+    #
+    # Run AFTER all flag merges so portablemc, extra_jvm_flags, and any -D
+    # properties from JVM_BOOT_FLAGS-style env vars are normalised together.
+    # In memory-resident mode lib/modules MUST exist or HotSpot will abort
+    # with "Could not find or load module image: lib/modules" — fail fast.
+    jvm_flags = _enforce_jvm_path_overrides(
+        jvm_flags, jdk_bin,
+        require_runtime_image=memory_resident,
+    )
+
+    # Make jdk_bin / jdk_bin/server resolvable for any auxiliary JDK DLL
+    # the JVM loads through the OS loader after JNI_CreateJavaVM (jawt.dll,
+    # sunmscapi.dll, awt.dll, ...).  Cookies stay alive for the run.
+    _dll_search_cookies = _augment_dll_search_path(jdk_bin)  # noqa: F841
+
     log.info(
         "Config: main=%s  jvm_flags=%d  classpath=%d  game_args=%d",
         main_class, len(jvm_flags), len(classpath), len(game_args),
     )
 
     # ── Step 3: boot + launch ─────────────────────────────────────────────
-    if not memory_resident:
-        # Option 4: standard OS-loader JVM path
-        import jpype, jpype.imports  # noqa: F401
-        jvm_dll = str(jdk_bin / "server" / "jvm.dll")
-        log.info("startJVM (OS loader): %s", jvm_dll)
-        jpype.startJVM(
-            jvm_dll, *jvm_flags, classpath=classpath,
-            convertStrings=True, interrupt=True,
-        )
-        log.info("Launching: %s", main_class)
-        jpype.JClass(main_class).main(game_args[:])
-        _wait_non_daemon_threads()
-        return
+    java_home = _java_home_from_bin(jdk_bin)
 
-    # Option 5: memory-resident JVM path
-    JvmBootGlue(
-        loader=loader, jvm_flags=jvm_flags, classpath=classpath,
-        main_class=main_class, game_args=game_args, debug=debug,
-    ).boot()
+    with _ScrubJvmEnv(java_home):
+        if not memory_resident:
+            # Option 4: standard OS-loader JVM path
+            import jpype, jpype.imports  # noqa: F401
+            jvm_dll = str(jdk_bin / "server" / "jvm.dll")
+            log.info("startJVM (OS loader): %s", jvm_dll)
+            jpype.startJVM(
+                jvm_dll, *jvm_flags, classpath=classpath,
+                convertStrings=True, interrupt=True,
+            )
+            log.info("Launching: %s", main_class)
+            jpype.JClass(main_class).main(game_args[:])
+            _wait_non_daemon_threads()
+            return
+
+        # Option 5: memory-resident JVM path
+        JvmBootGlue(
+            loader=loader, jvm_flags=jvm_flags, classpath=classpath,
+            main_class=main_class, game_args=game_args, debug=debug,
+        ).boot()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
