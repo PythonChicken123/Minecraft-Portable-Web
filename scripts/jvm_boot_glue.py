@@ -1,4 +1,4 @@
-﻿"""
+"""
 jvm_boot_glue.py
 ════════════════
 Bridges the memory-resident JVM into JPype and launches Minecraft in-process.
@@ -57,6 +57,73 @@ log = logging.getLogger(__name__)
 # ── Paths ──────────────────────────────────────────────────────────────────
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _PMC_INTERCEPT_PY = _SCRIPTS_DIR / "pmc_intercept.py"
+
+# ── portablemc 5.x environment bootstrap ──────────────────────────────────
+# This MUST be called before any portablemc import to ensure the vendored
+# copy is used and (optionally) the native extension is loaded in-memory.
+_PMC_BOOTSTRAP_COMPLETE = False
+_PMC_INMEMORY_MODE = False
+
+
+def _ensure_portablemc_environment(*, inmemory: bool = False) -> bool:
+    """
+    Ensure the portablemc 5.x environment is properly initialized.
+
+    This function:
+    1. Adds the vendored portablemc tree to sys.path
+    2. Optionally loads the _portablemc.pyd in-memory (for strict exec policies)
+    3. Scrubs any pip-installed portablemc to avoid version conflicts
+
+    Parameters
+    ----------
+    inmemory : bool
+        If True, attempt to load _portablemc.pyd via pythonmemorymodule
+        instead of the normal LoadLibrary path.
+
+    Returns True if the environment is ready for portablemc imports.
+    """
+    global _PMC_BOOTSTRAP_COMPLETE, _PMC_INMEMORY_MODE
+
+    if _PMC_BOOTSTRAP_COMPLETE:
+        return True
+
+    # Ensure scripts dir is on path for local_portablemc import
+    scripts_str = str(_SCRIPTS_DIR)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+
+    try:
+        from local_portablemc import bootstrap, bootstrap_inmemory
+
+        if inmemory:
+            log.info("Bootstrapping portablemc 5.x in in-memory mode")
+            result = bootstrap_inmemory(scripts_dir=_SCRIPTS_DIR)
+            _PMC_INMEMORY_MODE = result
+            _PMC_BOOTSTRAP_COMPLETE = result
+            if result:
+                log.info("portablemc 5.x in-memory bootstrap successful")
+            else:
+                log.warning(
+                    "In-memory bootstrap failed; falling back to standard mode"
+                )
+                # Fall back to standard bootstrap
+                _PMC_BOOTSTRAP_COMPLETE = bootstrap(scripts_dir=_SCRIPTS_DIR)
+        else:
+            _PMC_BOOTSTRAP_COMPLETE = bootstrap(scripts_dir=_SCRIPTS_DIR)
+
+        return _PMC_BOOTSTRAP_COMPLETE
+
+    except ImportError as exc:
+        log.warning("Could not import local_portablemc: %s", exc)
+        return False
+    except Exception as exc:
+        log.error("portablemc environment bootstrap failed: %s", exc)
+        return False
+
+
+def is_portablemc_inmemory() -> bool:
+    """Check if portablemc is running in in-memory mode."""
+    return _PMC_INMEMORY_MODE
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -202,7 +269,7 @@ def _wide_path_arg_to_str(path) -> str:
         return ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════��══════════════════════════════════════
 # § 3  ctypes WINFUNCTYPE prototypes
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2158,17 +2225,56 @@ class PortableMCGameAdapter:
 
     # ── public ────────────────────────────────────────────────────────────
 
-    def resolve(self) -> tuple[list[str], list[str], str, list[str]]:
-        """Run the adapter and return (jvm_flags, classpath, main_class, game_args)."""
+    def resolve(
+        self, *, inmemory: bool = False
+    ) -> tuple[list[str], list[str], str, list[str]]:
+        """
+        Run the adapter and return (jvm_flags, classpath, main_class, game_args).
+
+        Parameters
+        ----------
+        inmemory : bool
+            If True, attempt to load portablemc's native extension in-memory
+            using pythonmemorymodule.  This is useful for environments with
+            strict .exe/.dll execution policies.
+        """
+        # Step 1: Ensure portablemc environment is initialized
+        if not _ensure_portablemc_environment(inmemory=inmemory):
+            raise RuntimeError(
+                "portablemc 5.x environment initialization failed.\n"
+                "Ensure the vendored portablemc tree exists at:\n"
+                f"  {_SCRIPTS_DIR / 'portablemc' / 'portablemc-py' / 'python'}\n"
+                "Or ensure the wheel is available at:\n"
+                f"  {_SCRIPTS_DIR / 'portablemc' / 'target' / 'wheels'}"
+            )
+
+        # Step 2: Try the Python API
         try:
             result = self._via_python_api()
-            log.info("portablemc resolved via: Python API")
+            mode = "in-memory" if is_portablemc_inmemory() else "standard"
+            log.info("portablemc resolved via: Python API (%s mode)", mode)
             return result
+        except ImportError as exc:
+            # More specific error for import failures
+            raise RuntimeError(
+                f"portablemc 5.x module import failed: {exc}\n"
+                "The native extension (_portablemc.pyd) may not be compatible "
+                "with this Python version.\n"
+                "Expected location: "
+                f"{_SCRIPTS_DIR / 'portablemc' / 'portablemc-py' / 'python' / 'portablemc'}"
+            ) from exc
+        except AttributeError as exc:
+            # API mismatch - wrong portablemc version
+            raise RuntimeError(
+                f"portablemc API mismatch: {exc}\n"
+                "This launcher requires portablemc 5.x with PyO3 bindings.\n"
+                "Ensure you have the correct version of the native extension."
+            ) from exc
         except Exception as exc:
             raise RuntimeError(
-                "portablemc 5.x API resolution failed.\n"
-                "Ensure portablemc is importable in this interpreter "
-                "(Windows: py -m pip install portablemc)."
+                f"portablemc 5.x API resolution failed: {type(exc).__name__}: {exc}\n"
+                "Check that the vendored portablemc installation is complete "
+                "and the native extension is compatible with this Python version."
             ) from exc
 
     # ── path 1: portablemc 5.x PyO3 API ──────────────────────────────────
@@ -2280,7 +2386,7 @@ class PortableMCGameAdapter:
             log.warning("Could not auto-detect JDK from Python API launch args")
         return _ArgSplitter.split(full_args[1:])
 
-    # ── static helpers ─────────────────────────────────────────────────────
+    # ── static helpers ──────────────────────────────────────��──────────────
 
     @staticmethod
     def _extract_args(jvm_args, game_args, main_class):
@@ -2474,6 +2580,7 @@ def launch_minecraft(
     extra_game_args: list[str] | None = None,
     debug: bool = False,
     memory_resident: bool = False,
+    portablemc_inmemory: bool = False,
 ) -> None:
     """
     Full in-process Minecraft launcher.  No java.exe is spawned.
@@ -2484,6 +2591,14 @@ def launch_minecraft(
     memory_resident=True   (option 5)
         jvm.dll and all JDK deps mapped into RAM via JvmMemoryLoader.
         jpype.startJVM intercepted via IAT hooks.
+
+    portablemc_inmemory=True
+        Load the _portablemc.pyd extension in-memory using pythonmemorymodule
+        instead of the normal LoadLibrary path.  This is useful for environments
+        with strict .exe/.dll execution policies.
+
+    Note: subprocess/os.system/external process calls are NOT used.
+    Everything runs within the current Python process.
     """
     logging.basicConfig(
         level=logging.DEBUG if debug else logging.INFO,
@@ -2497,6 +2612,7 @@ def launch_minecraft(
     # causes HotSpot's CRT bootstrap to abort with
     # "Failed setting boot class path" or a segfault inside JNI_CreateJavaVM.
     log.info("Resolving Minecraft version: %r", version)
+    log.info("portablemc mode: %s", "in-memory" if portablemc_inmemory else "standard")
     adapter = PortableMCGameAdapter(
         main_dir=main_dir,
         version=version,
@@ -2505,7 +2621,9 @@ def launch_minecraft(
         access_token=access_token,
         extra_jvm_flags=extra_jvm_flags,
     )
-    jvm_flags, classpath, main_class, game_args = adapter.resolve()
+    jvm_flags, classpath, main_class, game_args = adapter.resolve(
+        inmemory=portablemc_inmemory
+    )
 
     # Always prefer portablemc's auto-detected JDK (e.g. java-runtime-epsilon)
     # over the caller's explicit jdk_bin.  For option 5 the memory loader MUST

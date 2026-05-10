@@ -999,7 +999,7 @@ def download_file(url, dest_path):
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # § 9  MSBUILD CANDIDATE DETECTION  (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════���═══════════════════════════════════════════════════════
 
 
 def _add_msbuild_candidate(candidates, path, priority):
@@ -2239,7 +2239,10 @@ def run_cli_launcher():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def run_inprocess_launcher(memory_resident: bool = False):
+def run_inprocess_launcher(
+    memory_resident: bool = False,
+    portablemc_inmemory: bool = False,
+):
     """
     Memory-resident JVM launcher — the entire game runs inside this process.
 
@@ -2263,12 +2266,27 @@ def run_inprocess_launcher(memory_resident: bool = False):
             Minecraft runs. This call blocks until the game exits.
 
     No .exe files are spawned at any point in this path.
+
+    Parameters
+    ----------
+    memory_resident : bool
+        If True, load jvm.dll into memory using pythonmemorymodule instead
+        of the normal OS loader path.
+    portablemc_inmemory : bool
+        If True, load the _portablemc.pyd extension in-memory using
+        pythonmemorymodule.  This is useful for environments with strict
+        .exe/.dll execution policies.
     """
     print("\n" + "=" * 62)
     env_memory_resident = (
         os.environ.get("LAUNCHER_MEMORY_JVM", "").strip().lower() in TRUTHY_ENV_VALUES
     )
+    env_portablemc_inmemory = (
+        os.environ.get("LAUNCHER_PORTABLEMC_INMEMORY", "").strip().lower()
+        in TRUTHY_ENV_VALUES
+    )
     memory_resident = bool(memory_resident or env_memory_resident)
+    portablemc_inmemory = bool(portablemc_inmemory or env_portablemc_inmemory)
     mode_name = "inprocess_memory" if memory_resident else "inprocess_jpype"
     effective_jdk_bin = resolve_effective_launcher_jdk_bin(memory_resident=memory_resident)
 
@@ -2357,7 +2375,8 @@ def run_inprocess_launcher(memory_resident: bool = False):
     print(f"        server   : {DEFAULT_SERVER_IP}")
     print(f"        jdk_bin  : {effective_jdk_bin}")
     print(f"        main_dir : {BASE_DIR}")
-    print(f"        loader   : {'memory-resident' if memory_resident else 'os-loader'}")
+    print(f"        jvm_load : {'memory-resident' if memory_resident else 'os-loader'}")
+    print(f"        pmc_load : {'in-memory' if portablemc_inmemory else 'standard'}")
     print()
 
     # Build extra JVM flags: DEFAULT_JVM_OPTS tokens + auto-join server flag.
@@ -2388,6 +2407,7 @@ def run_inprocess_launcher(memory_resident: bool = False):
                 in TRUTHY_ENV_VALUES
             ),
             memory_resident=memory_resident,
+            portablemc_inmemory=portablemc_inmemory,
         )
         print("\n✅ Minecraft exited normally.")
         return True
@@ -2409,6 +2429,7 @@ def run_inprocess_launcher(memory_resident: bool = False):
                 "version": INPROCESS_VERSION,
                 "username": DEFAULT_USERNAME,
                 "memory_resident": memory_resident,
+                "portablemc_inmemory": portablemc_inmemory,
             },
         )
         if dump:
@@ -2528,12 +2549,24 @@ def main():
     elif choice == "4":
         update_launcher_state(last_run_mode="inprocess_jpype")
         os.environ.pop("LAUNCHER_MEMORY_JVM", None)
-        success = run_inprocess_launcher(memory_resident=False)
+        # Enable portablemc in-memory loading for environments with strict
+        # .exe/.dll execution policies (can be toggled via env var)
+        pmc_inmem = (
+            os.environ.get("LAUNCHER_PORTABLEMC_INMEMORY", "").strip().lower()
+            in TRUTHY_ENV_VALUES
+        )
+        success = run_inprocess_launcher(
+            memory_resident=False, portablemc_inmemory=pmc_inmem
+        )
 
     elif choice == "5":
         update_launcher_state(last_run_mode="inprocess_memory")
         os.environ["LAUNCHER_MEMORY_JVM"] = "1"
-        success = run_inprocess_launcher(memory_resident=True)
+        # In memory-resident mode, always enable portablemc in-memory loading
+        # as this mode is specifically for environments with strict exec policies
+        success = run_inprocess_launcher(
+            memory_resident=True, portablemc_inmemory=True
+        )
 
     elif choice == "d":
         run_debug_menu()
