@@ -11,6 +11,8 @@ Boot sequence
    vendored Python tree, extract it from the wheel automatically (one-time).
 3. Prepend the vendored tree to sys.path and strip every other portablemc
    path so pip-installed copies can never shadow the local version.
+4. Optionally load the _portablemc.pyd binary in-memory using pythonmemorymodule
+   for environments with strict .exe execution policies.
 
 Call ``bootstrap()`` (or ``prepend_vendor_portablemc()``) from every entry
 point before any ``import portablemc`` statement.
@@ -18,10 +20,19 @@ point before any ``import portablemc`` statement.
 
 from __future__ import annotations
 
+import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import logging
 import sys
+import types
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Sequence
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +42,10 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 _VENDOR_ROOT = _SCRIPTS_DIR / "portablemc" / "portablemc-py" / "python"
 _WHEEL_SEARCH = _SCRIPTS_DIR / "portablemc" / "target" / "wheels"
 _PMC_PKG_DIR = _VENDOR_ROOT / "portablemc"
+
+# Track whether the native extension has been loaded in-memory
+_PYD_LOADED_INMEMORY: bool = False
+_PYD_MEMORY_MODULE: object | None = None
 
 
 # ── Wheel extraction ───────────────────────────────────────────────────────
@@ -192,3 +207,229 @@ def prepend_vendor_portablemc(
         sd = Path(project_root).resolve() / "scripts"
     bootstrap(scripts_dir=sd)
     return _VENDOR_ROOT if _VENDOR_ROOT.is_dir() else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# § IN-MEMORY PYD LOADING
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# For environments with strict .exe/.dll execution policies, load the
+# _portablemc.cp314-win_amd64.pyd binary directly into memory using
+# pythonmemorymodule.  This bypasses normal LoadLibrary and allows the
+# extension to be imported without triggering execution policy blocks.
+#
+# Usage:
+#   from local_portablemc import bootstrap_inmemory
+#   bootstrap_inmemory()  # Must be called BEFORE any portablemc import
+#   import portablemc.mojang  # Now works even with strict policies
+
+
+def _find_pyd_file() -> Path | None:
+    """
+    Locate the _portablemc.cp*-win_amd64.pyd file in the vendored tree.
+    Returns None if not found.
+    """
+    if not _PMC_PKG_DIR.is_dir():
+        return None
+    # Match any Python version's pyd file
+    for pyd in _PMC_PKG_DIR.glob("_portablemc*.pyd"):
+        return pyd
+    return None
+
+
+def _load_pyd_inmemory(pyd_path: Path) -> types.ModuleType | None:
+    """
+    Load a .pyd file into memory using pythonmemorymodule.
+
+    Returns the loaded module object, or None on failure.
+    This function:
+    1. Reads the .pyd binary into memory
+    2. Uses pythonmemorymodule.MemoryModule to map it
+    3. Creates a module object and initializes it via PyInit_*
+    """
+    global _PYD_LOADED_INMEMORY, _PYD_MEMORY_MODULE
+
+    if _PYD_LOADED_INMEMORY and _PYD_MEMORY_MODULE is not None:
+        log.debug("_portablemc pyd already loaded in-memory")
+        return _PYD_MEMORY_MODULE
+
+    try:
+        # Ensure pythonmemorymodule is available
+        scripts_str = str(_SCRIPTS_DIR)
+        if scripts_str not in sys.path:
+            sys.path.insert(0, scripts_str)
+
+        from pythonmemorymodule import MemoryModule
+
+        log.info("Loading _portablemc.pyd in-memory from: %s", pyd_path)
+        pyd_data = pyd_path.read_bytes()
+
+        # Create a MemoryModule from the pyd bytes
+        mem_mod = MemoryModule(data=pyd_data, debug=False)
+
+        # Get the PyInit function address
+        # The function name is PyInit_<module_name> for Python 3 extensions
+        init_func_name = b"PyInit__portablemc"
+        init_func_addr = mem_mod.get_proc_addr("PyInit__portablemc")
+
+        if not init_func_addr:
+            log.error("Could not find PyInit__portablemc in pyd")
+            return None
+
+        # Create a ctypes function type for PyInit
+        import ctypes
+
+        PyInit_func = ctypes.PYFUNCTYPE(ctypes.py_object)
+        init_func = PyInit_func(ctypes.cast(init_func_addr, ctypes.c_void_p).value)
+
+        # Call the init function to get the module object
+        module = init_func()
+
+        if module is None:
+            log.error("PyInit__portablemc returned None")
+            return None
+
+        # Register the module in sys.modules
+        sys.modules["_portablemc"] = module
+        sys.modules["portablemc._portablemc"] = module
+
+        _PYD_LOADED_INMEMORY = True
+        _PYD_MEMORY_MODULE = module
+        log.info("Successfully loaded _portablemc.pyd in-memory")
+        return module
+
+    except ImportError as exc:
+        log.warning(
+            "pythonmemorymodule not available for in-memory loading: %s", exc
+        )
+        return None
+    except Exception as exc:
+        log.error("Failed to load _portablemc.pyd in-memory: %s", exc)
+        return None
+
+
+def _create_portablemc_package() -> bool:
+    """
+    Create the portablemc package structure in sys.modules if not present.
+    This ensures submodules like portablemc.mojang can be imported.
+    """
+    if "portablemc" not in sys.modules:
+        # Create the portablemc package module
+        pkg = types.ModuleType("portablemc")
+        pkg.__path__ = [str(_PMC_PKG_DIR)]
+        pkg.__file__ = str(_PMC_PKG_DIR / "__init__.py")
+        pkg.__package__ = "portablemc"
+        sys.modules["portablemc"] = pkg
+        log.debug("Created portablemc package in sys.modules")
+    return True
+
+
+def _setup_portablemc_submodule_stubs() -> None:
+    """
+    Create stub modules for portablemc submodules that forward to the
+    native extension's submodules.
+
+    portablemc 5.x exposes:
+      - portablemc.mojang
+      - portablemc.fabric
+      - portablemc.forge
+      - portablemc.msa
+
+    These are implemented as Rust code compiled into _portablemc.pyd
+    and exposed via PyO3.
+    """
+    if "_portablemc" not in sys.modules:
+        log.warning("Cannot create submodule stubs: _portablemc not loaded")
+        return
+
+    native_mod = sys.modules["_portablemc"]
+    pkg = sys.modules.get("portablemc")
+
+    if pkg is None:
+        _create_portablemc_package()
+        pkg = sys.modules["portablemc"]
+
+    # List of submodules exposed by the native extension
+    submodules = ["mojang", "fabric", "forge", "msa", "base"]
+
+    for submod_name in submodules:
+        full_name = f"portablemc.{submod_name}"
+        if full_name in sys.modules:
+            continue
+
+        # Try to get the submodule from the native extension
+        submod = getattr(native_mod, submod_name, None)
+        if submod is not None:
+            sys.modules[full_name] = submod
+            setattr(pkg, submod_name, submod)
+            log.debug("Registered submodule: %s", full_name)
+        else:
+            log.debug("Submodule %s not found in _portablemc", submod_name)
+
+
+def bootstrap_inmemory(*, scripts_dir: Path | None = None) -> bool:
+    """
+    Full in-memory bootstrap: load _portablemc.pyd via pythonmemorymodule.
+
+    This bypasses normal LoadLibrary calls and allows the extension to work
+    in environments with strict .exe/.dll execution policies.
+
+    Call this ONCE at the top of every entry-point before any portablemc import.
+    Returns True when the extension is ready.
+
+    Usage:
+        from local_portablemc import bootstrap_inmemory
+        if bootstrap_inmemory():
+            import portablemc.mojang
+            # ... use portablemc 5.x API
+    """
+    global _SCRIPTS_DIR, _VENDOR_ROOT, _WHEEL_SEARCH, _PMC_PKG_DIR
+
+    # Update paths if scripts_dir is provided
+    if scripts_dir is not None:
+        sd = Path(scripts_dir).resolve()
+        _SCRIPTS_DIR = sd
+        _VENDOR_ROOT = sd / "portablemc" / "portablemc-py" / "python"
+        _WHEEL_SEARCH = sd / "portablemc" / "target" / "wheels"
+        _PMC_PKG_DIR = _VENDOR_ROOT / "portablemc"
+
+    # Ensure scripts dir is on path for pythonmemorymodule
+    scripts_str = str(_SCRIPTS_DIR)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+
+    # Step 1: Extract pyd from wheel if needed
+    _ensure_pyd()
+
+    # Step 2: Scrub pip-installed portablemc to avoid conflicts
+    _scrub_pip_portablemc()
+
+    # Step 3: Prepend vendor root for pure-Python fallback modules
+    _prepend_vendor()
+
+    # Step 4: Find and load the pyd in-memory
+    pyd_path = _find_pyd_file()
+    if pyd_path is None:
+        log.warning("_portablemc.pyd not found in vendored tree")
+        return False
+
+    module = _load_pyd_inmemory(pyd_path)
+    if module is None:
+        return False
+
+    # Step 5: Create package structure and submodule stubs
+    _create_portablemc_package()
+    _setup_portablemc_submodule_stubs()
+
+    log.info("In-memory portablemc 5.x bootstrap complete")
+    return True
+
+
+def is_pyd_loaded_inmemory() -> bool:
+    """Check if the _portablemc.pyd is loaded in-memory."""
+    return _PYD_LOADED_INMEMORY
+
+
+def get_inmemory_module() -> object | None:
+    """Get the in-memory loaded _portablemc module, or None."""
+    return _PYD_MEMORY_MODULE
