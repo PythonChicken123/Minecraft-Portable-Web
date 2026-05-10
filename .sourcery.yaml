@@ -1,0 +1,6 @@
+ignore:
+  - "static/"
+  - "scripts/portablemc/"
+  - "scripts/pythonmemorymodule/"
+  - "scripts/windows/"
+  - "**/*.pyc"
