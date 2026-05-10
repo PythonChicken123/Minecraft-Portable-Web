@@ -1,0 +1,10 @@
+# Exclude compiled Python files from diffs and stats
+*.pyc linguist-generated=true
+*.pyc -diff
+
+# Treat everything these directories as generated 
+# This hides them from the diff view by default
+static/** linguist-generated=true
+scripts/portablemc/** linguist-generated=true
+scripts/pythonmemorymodule/** linguist-generated=true
+scripts/windows/** linguist-generated=true
