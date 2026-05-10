@@ -10,8 +10,8 @@ Patches subprocess.Popen (and subprocess.run) before importing portablemc so
 that when portablemc tries to launch Java we capture the full argument list and
 write it to <output_json>, then exit immediately instead of running the game.
 
-Works with any portablemc Python version (4.x pure-Python or 5.x PyO3 wrapper)
-because we intercept at the OS process boundary, not at the Python API level.
+Works with portablemc 5.x (PyO3 API via Installer) and falls back to 4.x
+(pure-Python portablemc.cli) because we intercept at the OS process boundary.
 
 Output JSON schema
 ──────────────────
@@ -23,30 +23,50 @@ On failure:
 """
 
 from __future__ import annotations
-import json, os, subprocess, sys
+
+import json
+import subprocess
+import sys
 from pathlib import Path
+
+# ── Bootstrap local portablemc FIRST, before any portablemc import ────────
+_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS = _ROOT / "scripts"
+
+# Ensure scripts/ is on sys.path so local_portablemc is importable
+_ss = str(_SCRIPTS.resolve())
+if _ss not in sys.path:
+    sys.path.insert(0, _ss)
+
+from local_portablemc import bootstrap as _bootstrap  # noqa: E402
+_bootstrap(scripts_dir=_SCRIPTS)
 
 
 def _main() -> None:
+    # ── Argument check (before output_path is known) ──────────────────────
     if len(sys.argv) < 5:
-        _fail("Usage: pmc_intercept.py <output_json> <main_dir> <version> <username>")
+        print(
+            "Usage: pmc_intercept.py <output_json> <main_dir> <version> <username>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     output_path = Path(sys.argv[1])
-    main_dir    = sys.argv[2]
-    version     = sys.argv[3]
-    username    = sys.argv[4]
+    main_dir = sys.argv[2]
+    version = sys.argv[3]
+    username = sys.argv[4]
 
-    # ── Remove scripts/ from sys.path so 'portablemc' resolves to the installed
-    # pip package, not scripts/portablemc.py (the Flask web UI launcher). ──────
-    _scripts = str(Path(__file__).resolve().parent)
+    # Drop the bare scripts/ entry from sys.path so portablemc's own imports
+    # can't accidentally re-import from there, but leave the vendor root intact.
+    _scripts_resolved = str(Path(__file__).resolve().parent)
     sys.path = [
         p for p in sys.path
-        if Path(p).resolve() != Path(_scripts).resolve()
+        if Path(p).resolve() != Path(_scripts_resolved).resolve()
     ]
 
     _captured = False
     _real_Popen = subprocess.Popen
-    _real_run   = subprocess.run
+    _real_run = subprocess.run
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -66,7 +86,7 @@ def _main() -> None:
             json.dumps({
                 "found": True,
                 "args": [str(a) for a in args_seq],
-                "cwd":  str(cwd or ""),
+                "cwd": str(cwd or ""),
             }),
             encoding="utf-8",
         )
@@ -97,30 +117,72 @@ def _main() -> None:
         return _real_run(args, **kwargs)
 
     subprocess.Popen = _CapturePopen
-    subprocess.run   = _capture_run
+    subprocess.run = _capture_run
 
     # ── Run portablemc ────────────────────────────────────────────────────────
-
-    sys.argv = [
-        "portablemc",
-        "--main-dir", main_dir,
-        "start",
-        "-u", username,
-        version,
-    ]
+    # Try v5.x PyO3 API first, fall back to v4.x CLI if unavailable.
 
     try:
-        from portablemc.cli import main as _pmc_main  # type: ignore[import]
-        _pmc_main()
+        # Parse version prefix (fabric:, quilt:, forge:, etc.) into the
+        # correct v5.x Installer class.
+        colon = version.find(":")
+        if colon >= 0:
+            _prefix = version[:colon].lower()
+            _suffix = version[colon + 1:].strip()
+        else:
+            _prefix, _suffix = None, version
+
+        if _prefix in ("fabric", "quilt", "legacyfabric", "babric"):
+            from portablemc.fabric import Installer as _Inst  # type: ignore[import]
+            from portablemc.fabric import Loader, GameVersion  # type: ignore[import]
+            _loader_map = {
+                "fabric": Loader.Fabric,
+                "quilt": Loader.Quilt,
+                "legacyfabric": Loader.LegacyFabric,
+                "babric": Loader.Babric,
+            }
+            _gv = GameVersion.Stable if (not _suffix or _suffix == "latest") else _suffix
+            installer = _Inst(_loader_map[_prefix], _gv)
+        elif _prefix in ("forge", "neoforge"):
+            from portablemc.forge import Installer as _Inst  # type: ignore[import]
+            from portablemc.forge import Loader, Version as FVersion  # type: ignore[import]
+            _loader = Loader.Forge if _prefix == "forge" else Loader.NeoForge
+            if not _suffix or _suffix == "latest":
+                _fail(f"Forge/NeoForge requires a game version (got '{version}')")
+            installer = _Inst(_loader, FVersion.Stable(_suffix))
+        else:
+            from portablemc.mojang import Installer as _Inst  # type: ignore[import]
+            installer = _Inst(_suffix if _suffix else version)
+
+        installer.set_main_dir(main_dir)
+        installer.launcher_name = "portablemc"
+        game = installer.install()
+        game.command()
     except SystemExit:
         pass
-    except ImportError as exc:
-        _fail(f"portablemc not importable: {exc}")
+    except ImportError:
+        # v5.x API not available, try v4.x CLI as fallback
+        sys.argv = [
+            "portablemc",
+            "--main-dir", main_dir,
+            "start",
+            "-u", username,
+            version,
+        ]
+        try:
+            from portablemc.cli import main as _pmc_main  # type: ignore[import]
+            _pmc_main()
+        except SystemExit:
+            pass
+        except ImportError as exc:
+            _fail(f"portablemc not importable: {exc}")
+        except Exception as exc:
+            _fail(f"portablemc raised: {type(exc).__name__}: {exc}")
     except Exception as exc:
         _fail(f"portablemc raised: {type(exc).__name__}: {exc}")
     finally:
         subprocess.Popen = _real_Popen
-        subprocess.run   = _capture_run  # intentionally left patched until after except
+        subprocess.run = _real_run
 
     if not _captured:
         _fail("portablemc completed without launching java")

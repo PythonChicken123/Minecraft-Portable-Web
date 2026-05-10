@@ -1,4 +1,4 @@
-"""
+﻿"""
 jvm_memory_loader.py
 ════════════════════
 Memory-resident JVM loader for the in-process Minecraft launcher.
@@ -18,12 +18,13 @@ Problem 1 — GetProcAddress blind spot
   Fix: monkey-patch pythonmemorymodule.getprocaddr to route lookups for our
   in-memory handles through MemoryModule's own PE export walker.
 
-Problem 2 — jvm.dll DllMain crashes the process
-  jvm.dll's DllMain(DLL_PROCESS_ATTACH) calls GetModuleFileNameA/W on its own
-  HMODULE to locate the JDK home.  Because our module is not in the OS loader
-  table, the call returns empty and HotSpot's early initialiser calls exit().
-  Fix: override execPE() in JdkMemoryModule to silently skip the entry-point
-  for jvm.dll.  JNI_CreateJavaVM handles all real JVM initialisation.
+Problem 2 — jvm.dll DllMain is process-sensitive
+  HotSpot's DllMain(DLL_PROCESS_ATTACH) records vm_lib_handle, but executing it
+  from a manual mapper can be unsafe after a large Python bootstrap stack has
+  already loaded many native extensions.  We therefore skip jvm.dll's DllMain
+  by default and let jvm_boot_glue.py pin _ALT_JAVA_HOME_DIR so HotSpot can set
+  java.home without calling os::jvm_path().  For diagnostics, set
+  LAUNCHER_RUN_JVM_DLLMAIN=1 to run it synchronously.
 
 Problem 3 — Async DllMain races
   PythonMemoryModule fires DllMain in a daemon thread.  If a dependency's
@@ -53,6 +54,7 @@ import contextlib
 import ctypes
 import ctypes.wintypes
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Callable, Iterator
@@ -60,7 +62,7 @@ from typing import Callable, Iterator
 # ── PythonMemoryModule surface ─────────────────────────────────────────────
 import pythonmemorymodule as _pmm
 import pythonmemorymodule.pefile as _pefile
-from pythonmemorymodule import FARPROC, LONG_PTR, LoadLibraryW, MemoryModule
+from pythonmemorymodule import LoadLibraryW, MemoryModule
 
 log = logging.getLogger(__name__)
 
@@ -72,21 +74,21 @@ log = logging.getLogger(__name__)
 
 JNI_CreateJavaVM_t = ctypes.WINFUNCTYPE(
     ctypes.c_int,
-    ctypes.POINTER(ctypes.c_void_p),   # JavaVM **pvm
-    ctypes.POINTER(ctypes.c_void_p),   # JNIEnv **penv
-    ctypes.c_void_p,                    # JavaVMInitArgs *args
+    ctypes.POINTER(ctypes.c_void_p),  # JavaVM **pvm
+    ctypes.POINTER(ctypes.c_void_p),  # JNIEnv **penv
+    ctypes.c_void_p,  # JavaVMInitArgs *args
 )
 
 JNI_GetDefaultJavaVMInitArgs_t = ctypes.WINFUNCTYPE(
     ctypes.c_int,
-    ctypes.c_void_p,                    # void *args
+    ctypes.c_void_p,  # void *args
 )
 
 JNI_GetCreatedJavaVMs_t = ctypes.WINFUNCTYPE(
     ctypes.c_int,
-    ctypes.POINTER(ctypes.c_void_p),   # JavaVM **vmBuf
-    ctypes.c_int,                       # jsize bufLen
-    ctypes.POINTER(ctypes.c_int),       # jsize *nVMs
+    ctypes.POINTER(ctypes.c_void_p),  # JavaVM **vmBuf
+    ctypes.c_int,  # jsize bufLen
+    ctypes.POINTER(ctypes.c_int),  # jsize *nVMs
 )
 
 
@@ -97,27 +99,43 @@ JNI_GetCreatedJavaVMs_t = ctypes.WINFUNCTYPE(
 
 # DLLs we load from memory via PythonMemoryModule.
 # Everything else (CRT, Win32, api-ms-win-*) is already in the process.
-_JDK_OWNED: frozenset[str] = frozenset({
-    "verify.dll",
-    "jli.dll",
-    "zip.dll",
-    "java.dll",
-    "jimage.dll",
-    "jsvml.dll",   # optional SIMD library — silently skipped if absent
-    "jvm.dll",
-})
+_JDK_OWNED: frozenset[str] = frozenset(
+    {
+        "verify.dll",
+        "jli.dll",
+        "zip.dll",
+        "java.dll",
+        "jimage.dll",
+        # NOTE: jsvml.dll (optional SIMD library) intentionally NOT memory-mapped.
+        # HotSpot may load it opportunistically; letting the OS loader handle it
+        # avoids extra manual-mapper surface area during early JVM bootstrap.
+        "jvm.dll",
+    }
+)
 
 # System DLLs that must always fall through to the OS loader.
-_ALWAYS_OS: frozenset[str] = frozenset({
-    "kernel32.dll", "ntdll.dll", "user32.dll", "advapi32.dll",
-    "ws2_32.dll", "psapi.dll", "dbghelp.dll",
-    "ucrtbase.dll", "vcruntime140.dll", "vcruntime140_1.dll",
-    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-})
+_ALWAYS_OS: frozenset[str] = frozenset(
+    {
+        "kernel32.dll",
+        "ntdll.dll",
+        "user32.dll",
+        "advapi32.dll",
+        "ws2_32.dll",
+        "psapi.dll",
+        "dbghelp.dll",
+        "ucrtbase.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+    }
+)
 
 
 def _is_jdk_dll(name: str) -> bool:
     return name.lower() in _JDK_OWNED
+
 
 def _is_api_set(name: str) -> bool:
     """api-ms-win-* are OS forwarder stubs — always use the OS loader."""
@@ -129,6 +147,7 @@ def _is_api_set(name: str) -> bool:
 #      Serialises PythonMemoryModule's async thread so each DllMain completes
 #      before the next dependency is loaded.
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @contextlib.contextmanager
 def _synchronous_threads() -> Iterator[None]:
@@ -154,11 +173,12 @@ def _synchronous_threads() -> Iterator[None]:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # § 4  JdkMemoryModule
-#      MemoryModule subclass with three behaviours tailored for JDK DLLs:
+#      MemoryModule subclass with behaviours tailored for JDK DLLs:
 #        (a) custom dlopen resolver — routes inter-JDK imports through our registry
 #        (b) synchronous DllMain — entry point runs before __init__ returns
-#        (c) entry-point skip — jvm.dll's DllMain is suppressed (see module doc)
+#        (c) optional jvm.dll entry skip — avoids process-sensitive crashes
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class JdkMemoryModule(MemoryModule):
     """
@@ -173,18 +193,15 @@ class JdkMemoryModule(MemoryModule):
         build_import_table() so inter-JDK imports resolve through our registry
         instead of the OS loader.
     dll_name
-        Human-readable name (e.g. ``"jvm.dll"``).  Used to decide whether the
-        entry point should be skipped.
+        Human-readable name (e.g. ``"jvm.dll"``).  Stored for diagnostics.
     debug
         Verbose PythonMemoryModule debug output.
     """
 
-    # DLLs whose DllMain must NOT be called during in-memory loading.
-    #
-    # jvm.dll  — its DllMain calls GetModuleFileNameA/W on its own HMODULE to
-    #            locate the JDK home.  Since our module is not in the OS loader
-    #            table, the call returns empty, HotSpot panics, and calls
-    #            exit().  JNI_CreateJavaVM handles all real JVM initialisation.
+    # Skip jvm.dll's DllMain by default.  The bootstrap pins
+    # _ALT_JAVA_HOME_DIR so HotSpot does not need vm_lib_handle to derive
+    # java.home, and skipping the entry point avoids process-sensitive crashes
+    # seen after main.py has loaded its own native bootstrap stack.
     SKIP_ENTRY_POINT: frozenset[str] = frozenset({"jvm.dll"})
 
     def __init__(
@@ -211,12 +228,20 @@ class JdkMemoryModule(MemoryModule):
         """
         Run DLL_PROCESS_ATTACH.
 
-        Suppressed for DLLs listed in SKIP_ENTRY_POINT.  See class docstring
-        for the full explanation of why jvm.dll must be skipped.
+        Suppressed for DLLs listed in SKIP_ENTRY_POINT unless explicitly
+        overridden with LAUNCHER_RUN_JVM_DLLMAIN=1 for diagnostics.
         """
-        if self._dll_name_lower in self.SKIP_ENTRY_POINT:
+        run_jvm_dllmain = os.environ.get(
+            "LAUNCHER_RUN_JVM_DLLMAIN", ""
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self._dll_name_lower in self.SKIP_ENTRY_POINT and not run_jvm_dllmain:
             log.debug(
-                "Skipping DllMain for %-20s  (suppressed — JNI_CreateJavaVM handles init)",
+                "Skipping DllMain for %-20s  (java.home pinned via _ALT_JAVA_HOME_DIR)",
                 self._dll_name_lower,
             )
             return
@@ -242,10 +267,15 @@ def _patched_getprocaddr(handle: int, func_name_bytes: bytes) -> int:
     if mod is not None:
         func_name = func_name_bytes.decode("ascii", errors="replace")
         try:
-            offset = mod._proc_addr_by_name(func_name)
-            return mod._codebaseaddr + offset
+            # Use public helper so export directory is initialised lazily.
+            fp = mod.get_proc_addr(func_name)
+            return ctypes.cast(fp, ctypes.c_void_p).value or 0
         except WindowsError:
-            log.debug("getprocaddr: %r not found in in-memory module @ 0x%x", func_name, handle)
+            log.debug(
+                "getprocaddr: %r not found in in-memory module @ 0x%x",
+                func_name,
+                handle,
+            )
             return 0
     return _original_getprocaddr(handle, func_name_bytes)
 
@@ -271,6 +301,7 @@ def _uninstall_getprocaddr_patch() -> None:
 #      Top-level orchestrator: dependency graph → load order → map → verify
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class JvmMemoryLoader:
     """
     Maps jvm.dll and all JDK dependencies into process memory.
@@ -293,17 +324,36 @@ class JvmMemoryLoader:
     """
 
     def __init__(self, jdk_bin: Path, debug: bool = False) -> None:
-        self.jdk_bin:    Path = jdk_bin
+        self.jdk_bin: Path = jdk_bin
         self.jdk_server: Path = jdk_bin / "server"
-        self.debug:      bool = debug
+        self.debug: bool = debug
 
         # Loaded modules: lowercase dll name → JdkMemoryModule
         self._mods: dict[str, JdkMemoryModule] = {}
 
         # Typed JNI entry-points (populated by load())
-        self._jni_create_java_vm:        JNI_CreateJavaVM_t | None          = None
+        self._jni_create_java_vm: JNI_CreateJavaVM_t | None = None
         self._jni_get_default_init_args: JNI_GetDefaultJavaVMInitArgs_t | None = None
-        self._jni_get_created_jvms:      JNI_GetCreatedJavaVMs_t | None     = None
+        self._jni_get_created_jvms: JNI_GetCreatedJavaVMs_t | None = None
+
+    @staticmethod
+    def resolve_jvm_dll_file(jdk_bin: Path) -> Path:
+        """
+        Canonical on-disk ``jvm.dll`` under ``jdk_bin``.
+
+        Mojang runtimes normally use ``bin/server/jvm.dll``; legacy layouts
+        may place ``jvm.dll`` directly in ``bin/``.
+        """
+        server_path = jdk_bin / "server" / "jvm.dll"
+        if server_path.is_file():
+            return server_path
+        flat = jdk_bin / "jvm.dll"
+        return flat if flat.is_file() else server_path
+
+    @property
+    def jvm_dll_path(self) -> Path:
+        """Absolute-path ``jvm.dll`` used for JPype/IAT spoofing."""
+        return self.resolve_jvm_dll_file(self.jdk_bin)
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -379,7 +429,7 @@ class JvmMemoryLoader:
         except Exception as exc:
             log.warning("pefile parse failed for %s: %s", name, exc)
 
-        order.append(name)   # post-order: leaf first
+        order.append(name)  # post-order: leaf first
 
     def _load_one(self, dll_name: str) -> None:
         """Map a single JDK DLL into memory and register it."""
@@ -409,7 +459,9 @@ class JvmMemoryLoader:
 
         log.info(
             "  ↳ %-22s  base=0x%016x  size=0x%x",
-            name, mod._codebaseaddr, mod.OPTIONAL_HEADER.SizeOfImage,
+            name,
+            mod._codebaseaddr,
+            mod.OPTIONAL_HEADER.SizeOfImage,
         )
 
     def _resolve_jni(self, export_name: str, ftype: type):
@@ -439,8 +491,22 @@ class JvmMemoryLoader:
         _install_getprocaddr_patch()
 
         visited: set[str] = set()
-        order:   list[str] = []
-        self._collect_deps("jvm.dll", visited, order)
+        order: list[str] = []
+
+        # jvm.dll dynamically loads several sibling JDK DLLs at runtime
+        # (notably jimage.dll). They may not appear in jvm.dll's import table,
+        # so we proactively map them as well to keep LoadLibrary* hooks in
+        # jvm_boot_glue able to satisfy those loads from memory.
+        eager = [
+            "verify.dll",
+            "jli.dll",
+            "zip.dll",
+            "java.dll",
+            "jimage.dll",
+            "jvm.dll",
+        ]
+        for root in eager:
+            self._collect_deps(root, visited, order)
 
         log.info("Load order (%d JDK DLLs):", len(order))
         for i, name in enumerate(order, 1):
@@ -449,22 +515,28 @@ class JvmMemoryLoader:
         for name in order:
             self._load_one(name)
 
-        self._jni_create_java_vm = self._resolve_jni(           # type: ignore[assignment]
+        self._jni_create_java_vm = self._resolve_jni(  # type: ignore[assignment]
             "JNI_CreateJavaVM", JNI_CreateJavaVM_t
         )
-        self._jni_get_default_init_args = self._resolve_jni(    # type: ignore[assignment]
+        self._jni_get_default_init_args = self._resolve_jni(  # type: ignore[assignment]
             "JNI_GetDefaultJavaVMInitArgs", JNI_GetDefaultJavaVMInitArgs_t
         )
-        self._jni_get_created_jvms = self._resolve_jni(         # type: ignore[assignment]
+        self._jni_get_created_jvms = self._resolve_jni(  # type: ignore[assignment]
             "JNI_GetCreatedJavaVMs", JNI_GetCreatedJavaVMs_t
         )
 
-        log.info("JNI_CreateJavaVM         @ 0x%016x",
-                 ctypes.cast(self._jni_create_java_vm, ctypes.c_void_p).value)
-        log.info("JNI_GetDefaultJavaVMInitArgs @ 0x%016x",
-                 ctypes.cast(self._jni_get_default_init_args, ctypes.c_void_p).value)
-        log.info("JNI_GetCreatedJavaVMs    @ 0x%016x",
-                 ctypes.cast(self._jni_get_created_jvms, ctypes.c_void_p).value)
+        log.info(
+            "JNI_CreateJavaVM         @ 0x%016x",
+            ctypes.cast(self._jni_create_java_vm, ctypes.c_void_p).value,
+        )
+        log.info(
+            "JNI_GetDefaultJavaVMInitArgs @ 0x%016x",
+            ctypes.cast(self._jni_get_default_init_args, ctypes.c_void_p).value,
+        )
+        log.info(
+            "JNI_GetCreatedJavaVMs    @ 0x%016x",
+            ctypes.cast(self._jni_get_created_jvms, ctypes.c_void_p).value,
+        )
 
         return self
 
@@ -495,12 +567,16 @@ class JvmMemoryLoader:
         if ok:
             log.info(
                 "verify OK — JNI_CreateJavaVM @ 0x%016x inside [0x%016x, 0x%016x)",
-                addr, base, base + size,
+                addr,
+                base,
+                base + size,
             )
         else:
             log.error(
                 "verify FAIL — JNI_CreateJavaVM @ 0x%016x OUTSIDE [0x%016x, 0x%016x)",
-                addr, base, base + size,
+                addr,
+                base,
+                base + size,
             )
         return ok
 
@@ -552,6 +628,7 @@ class JvmMemoryLoader:
 # § 7  Standalone verification entry-point
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def run_verification(jdk_bin: Path, debug: bool = False) -> bool:
     """
     Smoke-test: load jvm.dll from memory and verify JNI_CreateJavaVM resolves.
@@ -562,12 +639,12 @@ def run_verification(jdk_bin: Path, debug: bool = False) -> bool:
         format="%(levelname)-8s %(message)s",
     )
     w = 60
-    print(f"\n{'═'*w}")
+    print(f"\n{'═' * w}")
     print("  JVM Memory Loader — Verification")
-    print(f"{'═'*w}")
+    print(f"{'═' * w}")
     print(f"  JDK bin : {jdk_bin}")
     print(f"  jvm.dll : {jdk_bin / 'server' / 'jvm.dll'}")
-    print(f"{'─'*w}\n")
+    print(f"{'─' * w}\n")
 
     try:
         loader = JvmMemoryLoader(jdk_bin=jdk_bin, debug=debug).load()
@@ -577,20 +654,22 @@ def run_verification(jdk_bin: Path, debug: bool = False) -> bool:
 
     ok = loader.verify()
 
-    print(f"\n{'─'*w}")
+    print(f"\n{'─' * w}")
     print("  Loaded modules:")
     for name, mod in loader.loaded_modules.items():
-        print(f"    {name:<24s}  base=0x{mod._codebaseaddr:016x}  "
-              f"size=0x{mod.OPTIONAL_HEADER.SizeOfImage:08x}")
+        print(
+            f"    {name:<24s}  base=0x{mod._codebaseaddr:016x}  "
+            f"size=0x{mod.OPTIONAL_HEADER.SizeOfImage:08x}"
+        )
 
-    print(f"\n{'─'*w}")
+    print(f"\n{'─' * w}")
     if ok:
         addr = ctypes.cast(loader.jni_create_java_vm, ctypes.c_void_p).value
         print(f"  [PASS] JNI_CreateJavaVM @ 0x{addr:016x}")
-        print( "  [PASS] Address confirmed inside jvm.dll mapped region")
+        print("  [PASS] Address confirmed inside jvm.dll mapped region")
     else:
         print("  [FAIL] JNI_CreateJavaVM verification failed")
-    print(f"{'═'*w}\n")
+    print(f"{'═' * w}\n")
     return ok
 
 
