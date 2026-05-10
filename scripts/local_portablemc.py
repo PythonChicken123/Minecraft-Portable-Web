@@ -54,8 +54,11 @@ def _find_wheel() -> Path | None:
     """Return the first portablemc wheel found in the target/wheels dir."""
     if not _WHEEL_SEARCH.is_dir():
         return None
-    for whl in sorted(_WHEEL_SEARCH.glob("portablemc-*.whl")):
-        return whl
+    # Try different wheel naming patterns (maturin uses portablemc_py-*)
+    patterns = ["portablemc_py-*.whl", "portablemc-*.whl"]
+    for pattern in patterns:
+        for whl in sorted(_WHEEL_SEARCH.glob(pattern), reverse=True):
+            return whl  # Return most recent
     return None
 
 
@@ -63,13 +66,24 @@ def _pyd_present() -> bool:
     """True when the native extension already lives in the vendored tree."""
     if not _PMC_PKG_DIR.is_dir():
         return False
-    return any(_PMC_PKG_DIR.glob("_portablemc*.pyd"))
+    # Check for both naming conventions (.pyd for Windows, .so for Linux/Mac)
+    patterns = ["_portablemc*.pyd", "_portablemc*.so", "portablemc_py*.pyd", "portablemc_py*.so"]
+    for pattern in patterns:
+        if any(_PMC_PKG_DIR.glob(pattern)):
+            return True
+    return False
 
 
 def _extract_pyd_from_wheel(wheel: Path) -> bool:
     """
-    Extract every file from the wheel's ``portablemc/`` directory into the
+    Extract every file from the wheel's package directory into the
     vendored Python tree.  Skips dist-info and __pycache__ entries.
+
+    The wheel may contain either:
+    - portablemc/ (if built with package name portablemc)
+    - portablemc_py/ (if built with maturin default naming)
+    
+    Files are renamed appropriately to create a portablemc/ package.
 
     Returns True on success.
     """
@@ -77,21 +91,44 @@ def _extract_pyd_from_wheel(wheel: Path) -> bool:
         _PMC_PKG_DIR.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(wheel, "r") as zf:
             extracted = 0
+            # Detect the package prefix in the wheel
+            prefixes = ["portablemc/", "portablemc_py/"]
+            found_prefix = None
             for name in zf.namelist():
-                if not name.startswith("portablemc/"):
+                for prefix in prefixes:
+                    if name.startswith(prefix):
+                        found_prefix = prefix
+                        break
+                if found_prefix:
+                    break
+            
+            if not found_prefix:
+                log.warning("No portablemc package found in wheel %s", wheel.name)
+                return False
+            
+            for name in zf.namelist():
+                if not name.startswith(found_prefix):
                     continue
                 if "__pycache__" in name or name.endswith("/"):
                     continue
-                # Strip the leading "portablemc/" prefix; write relative to _PMC_PKG_DIR
-                rel = name[len("portablemc/"):]
+                if ".dist-info" in name:
+                    continue
+                
+                # Strip the leading prefix; write relative to _PMC_PKG_DIR
+                rel = name[len(found_prefix):]
                 if not rel:
                     continue
+                
+                # Rename portablemc_py to _portablemc in filenames
+                rel = rel.replace("portablemc_py", "_portablemc")
+                
                 dest = _PMC_PKG_DIR / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 data = zf.read(name)
                 dest.write_bytes(data)
                 extracted += 1
                 log.debug("Extracted %s → %s", name, dest)
+        
         log.info("Extracted %d files from %s into %s", extracted, wheel.name, _PMC_PKG_DIR)
         return extracted > 0
     except Exception as exc:

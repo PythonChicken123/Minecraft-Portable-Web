@@ -2240,12 +2240,18 @@ class PortableMCGameAdapter:
         """
         # Step 1: Ensure portablemc environment is initialized
         if not _ensure_portablemc_environment(inmemory=inmemory):
+            pmc_root = _SCRIPTS_DIR / "portablemc"
             raise RuntimeError(
-                "portablemc 5.x environment initialization failed.\n"
-                "Ensure the vendored portablemc tree exists at:\n"
-                f"  {_SCRIPTS_DIR / 'portablemc' / 'portablemc-py' / 'python'}\n"
-                "Or ensure the wheel is available at:\n"
-                f"  {_SCRIPTS_DIR / 'portablemc' / 'target' / 'wheels'}"
+                "portablemc 5.x environment initialization failed.\n\n"
+                "The native extension (_portablemc.pyd) is required but not found.\n\n"
+                "To fix this, run the build script:\n"
+                f"  python {pmc_root / 'build_wheel.py'}\n\n"
+                "Requirements:\n"
+                "  - Rust toolchain (https://rustup.rs/)\n"
+                "  - maturin (pip install maturin)\n\n"
+                "Expected locations after build:\n"
+                f"  - Wheel: {pmc_root / 'target' / 'wheels' / '*.whl'}\n"
+                f"  - Package: {pmc_root / 'portablemc-py' / 'python' / 'portablemc'}"
             )
 
         # Step 2: Try the Python API
