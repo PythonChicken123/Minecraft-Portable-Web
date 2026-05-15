@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 r"""
-Cross‑platform bootstrap script for embedded Python 3.14 (Windows only).
+Cross-platform bootstrap script for embedded Python 3.14 (Windows only).
 All files are stored in %LOCALAPPDATA%\PortableMC.
 Run with any Python (e.g., system 3.11) to set up and launch the launcher.
+
+Launch modes
+============
+1  Web launcher      – pmc_web.py Flask server, browser UI, subprocess game
+2  MSBuild launcher  – Launcher.targets (Microsoft-signed binaries)
+3  CLI launcher      – portablemc CLI in terminal, subprocess game
+4  In-Process        – Memory-resident JVM via JvmBootGlue + JPype (no java.exe)
+d  Debug menu
+q  Quit
 """
 
-import os
-import sys
-import subprocess
-import stat
-import urllib.request
-import zipfile
-import tarfile
-import shutil
-import platform
-import ssl
-import re
-import winreg
 import datetime
-import traceback
 import json
+import os
+import platform
+import re
+import shutil
+import ssl
+import stat
+import subprocess
+import sys
+import tarfile
+import traceback
+import urllib.request
+import winreg
+import zipfile
 from pathlib import Path
 
 # --- Windows-only guard ---
@@ -27,13 +36,17 @@ if platform.system().lower() != "windows":
     print("❌ This bootstrap script currently only supports Windows.")
     sys.exit(1)
 
-# --- Configuration ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 1  CONFIGURATION — original + in-process additions
+# ═══════════════════════════════════════════════════════════════════════════════
+
 ROOT_DIR = Path(__file__).parent
 PROJECT_LOGS_DIR = ROOT_DIR / "logs"
 PROJECT_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 APPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
-BASE_DIR = APPDATA / "PortableMC"
+LOCAL_BASE_DIR = APPDATA / "PortableMC"
+BASE_DIR = LOCAL_BASE_DIR
 EMBEDDED_DIR = BASE_DIR / "python"
 EMBEDDED_PYTHON = EMBEDDED_DIR / "python.exe"
 PORTABLEMC_VERSION = "5.0.2"
@@ -44,7 +57,7 @@ PYTHON_VERSION = "3.14.3"
 PYTHON_VERSIONS = ["3.15", "3.14", "3.13", "3.12", "3.11"]
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi"]
+BASE_PACKAGES = ["flask", "flask-socketio", "psutil", "ansi2html", "certifi", "vswhere"]
 PORTABLEMC_BIN_DIR = BASE_DIR / "portablemc_bin"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 ALLOW_INSECURE_SSL = (
@@ -53,22 +66,59 @@ ALLOW_INSECURE_SSL = (
 
 # Default game settings
 DEFAULT_USERNAME = "CubeUniform840"
-DEFAULT_SERVER_IP = "77.103.184.72"
+DEFAULT_SERVER_IP = "play.echoruins.com"
 DEFAULT_JVM_OPTS = "-Xmx3G -Xms3G"
 
 # Paths
-SCRIPTS_DIR = ROOT_DIR / "Scripts"
+SCRIPTS_DIR = ROOT_DIR / "scripts"
+_SCRIPTS_POS = str(SCRIPTS_DIR.resolve())
+if _SCRIPTS_POS not in sys.path:
+    sys.path.insert(0, _SCRIPTS_POS)
 SCRIPTS_DIR.mkdir(exist_ok=True)
+
+try:
+    import local_portablemc as _local_portablemc
+
+    _local_portablemc.prepend_vendor_portablemc(scripts_dir=SCRIPTS_DIR)
+except ImportError:
+    pass
+
 MSBUILD_PATH = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe"
 
 # Launcher files inside the Scripts folder
 TARGETS_FILE = SCRIPTS_DIR / "Launcher.targets"
 LAUNCHER_VBS = SCRIPTS_DIR / "Launcher.vbs"
 LAUNCHER_PS1 = SCRIPTS_DIR / "Launcher.ps1"
-PORTABLEMC_PY = SCRIPTS_DIR / "portablemc.py"
+PORTABLEMC_PY = SCRIPTS_DIR / "pmc_web.py"
 CONFIG_PATH = ROOT_DIR / "launcher_config.json"
 LAUNCHER_STATE = {}
 ACTIVE_TRUSTED_DIR = None
+
+# ── In-Process launcher constants ────────────────────────────────────────────
+# Absolute path to the JDK bin directory (contains jvm.dll in bin/server/)
+JDK_BIN = Path(
+    r"C:\Users\wave6\Downloads"
+    r"\OpenJDK25U-jdk_x64_windows_hotspot_25.0.3_9"
+    r"\jdk-25.0.3+9\bin"
+)
+
+# portablemc Mojang runtime (often JRE 21) — canonical source for manual-mapped
+# JVM in option 5 (HotSpot quirks with newer standalone JDK blobs are avoided).
+MEMORY_JVM_BIN_REL = Path("jvm") / "java-runtime-epsilon" / "bin"
+
+# Minecraft version string forwarded to portablemc's installer
+INPROCESS_VERSION = "fabric:"
+
+# Python packages that must be importable for in-process mode.
+# pythonmemorymodule ships as source inside scripts/ — only jpype1 needs pip.
+INPROCESS_PIP_DEPS = ["jpype1"]
+
+# ── Glue module paths ─────────────────────────────────────────────────────────
+# Both scripts live in SCRIPTS_DIR and import each other by name.
+JVM_BOOT_GLUE_PY = SCRIPTS_DIR / "jvm_boot_glue.py"
+JVM_MEMORY_LOADER_PY = SCRIPTS_DIR / "jvm_memory_loader.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG = {
     "schema_version": 1,
@@ -86,6 +136,11 @@ DEFAULT_CONFIG = {
     "allowlist_trusted_dirs": [],
     "include_sensitive_env_details": False,
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 2  CONFIG HELPERS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _safe_json_dump(path, payload):
@@ -285,6 +340,193 @@ def get_safe_local_cwd(preferred=None):
     return candidate
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 3  IN-PROCESS BOOTSTRAP HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _ensure_scripts_on_path() -> None:
+    """
+    Prepend SCRIPTS_DIR to sys.path so that jvm_boot_glue, jvm_memory_loader,
+    and the bundled pythonmemorymodule package are all importable in the
+    current Python process.
+
+    Safe to call multiple times — idempotent.
+    """
+    scripts_str = str(SCRIPTS_DIR)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+
+
+def _check_importable(module_name: str) -> bool:
+    """Return True if *module_name* can be imported in the current process."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+def _bootstrap_inprocess_deps() -> bool:
+    """
+    Ensure every Python dependency needed by jvm_boot_glue is importable
+    in the CURRENT Python interpreter (whichever is running main.py).
+
+    pythonmemorymodule ships as source inside scripts/ and becomes importable
+    after _ensure_scripts_on_path().  Only jpype1 requires a pip install.
+
+    Returns True on success, False if any dep cannot be satisfied.
+    """
+    _ensure_scripts_on_path()
+
+    # pythonmemorymodule — source present in scripts/; verify it loads.
+    if not _check_importable("pythonmemorymodule"):
+        print(
+            "❌ pythonmemorymodule not found under scripts/. "
+            "Ensure scripts/pythonmemorymodule/__init__.py exists."
+        )
+        return False
+    print("✅ pythonmemorymodule: found in scripts/")
+
+    # jpype1 — requires a compiled C extension; install via pip if missing.
+    if _check_importable("jpype"):
+        print("✅ jpype: already importable")
+    else:
+        print("📦 jpype not found — installing jpype1 via pip...")
+        env = os.environ.copy()
+        env["PYTHONNOUSERSITE"] = "1"
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "jpype1",
+            "--quiet",
+            "--no-warn-script-location",
+        ]
+        try:
+            result = subprocess.run(
+                cmd, env=env, capture_output=True, text=True, timeout=120
+            )  # nosec
+            if result.returncode != 0:
+                print(f"❌ pip install jpype1 failed:\n{result.stderr.strip()}")
+                return False
+            print("✅ jpype1 installed")
+        except Exception as exc:
+            print(f"❌ Could not install jpype1: {exc}")
+            return False
+
+        # Re-check after install
+        if not _check_importable("jpype"):
+            print(
+                "❌ jpype still not importable after install. "
+                "Check that pip installed into the active interpreter."
+            )
+            return False
+
+    # Verify glue scripts exist on disk
+    for script in (JVM_BOOT_GLUE_PY, JVM_MEMORY_LOADER_PY):
+        if not script.exists():
+            print(f"❌ Required glue script not found: {script}")
+            return False
+    print("✅ jvm_boot_glue.py and jvm_memory_loader.py: found")
+
+    return True
+
+
+def _candidate_portablemc_jvm_roots() -> list[Path]:
+    """Search roots that may contain ``jvm/java-runtime-*`` Mojang installs."""
+    seen: dict[str, None] = {}
+    roots: list[Path] = []
+
+    def _add(candidate: Path | None):
+        if candidate is None:
+            return
+        try:
+            rp = candidate.resolve()
+        except OSError:
+            rp = Path(candidate)
+        key = str(rp).casefold()
+        if key in seen:
+            return
+        seen[key] = None
+        roots.append(rp)
+
+    _pmc = os.environ.get("PMC_MAIN_DIR", "").strip()
+    if _pmc:
+        try:
+            _add(Path(_pmc))
+        except OSError:
+            pass
+    _add(BASE_DIR)
+    _add(LOCAL_BASE_DIR)
+    _add(ACTIVE_TRUSTED_DIR)
+    explicit = Path(
+        r"C:\Users\wave6\AppData\Local\PortableMC"
+    ).resolve()
+    _add(explicit)
+    return roots
+
+
+def resolve_effective_launcher_jdk_bin(*, memory_resident: bool) -> Path:
+    """
+    Return ``bin/`` owning the JVM image.
+
+    • Option 4 (OS-loaded): pinned OpenJDK 25 (`JDK_BIN`).
+    • Option 5 (memory): portablemc's Mojang epsilon JRE if present, otherwise
+      fall back to `JDK_BIN`.
+
+    Canonical files: ``bin/server/jvm.dll`` or ``bin/jvm.dll``.
+    """
+    openjdk_bin = JDK_BIN.resolve()
+    if not memory_resident:
+        return openjdk_bin
+
+    eps_bin: Path | None = None
+    for root in _candidate_portablemc_jvm_roots():
+        candidate = (root / MEMORY_JVM_BIN_REL).resolve()
+        if not candidate.is_dir():
+            continue
+        sj = candidate / "server" / "jvm.dll"
+        fj = candidate / "jvm.dll"
+        if sj.is_file() or fj.is_file():
+            eps_bin = candidate
+            break
+
+    return eps_bin if eps_bin else openjdk_bin
+
+
+def _verify_jdk_at(jdk_bin: Path | None = None) -> bool:
+    """
+    Confirm ``jdk_bin`` exists and ``jvm.dll`` is reachable (server/ or bin/).
+    Prints a diagnostic message and returns False on failure.
+    """
+    base = JDK_BIN if jdk_bin is None else Path(jdk_bin)
+    sj = base / "server" / "jvm.dll"
+    fj = base / "jvm.dll"
+    resolved = sj if sj.is_file() else (fj if fj.is_file() else None)
+    if not base.exists():
+        print(f"❌ JDK bin not found: {base}")
+        return False
+    if resolved is None:
+        print(f"❌ jvm.dll not found under {base} (checked server/jvm.dll, jvm.dll)")
+        return False
+    print(f"✅ JDK  : {base}")
+    print(f"✅ jvm  : {resolved}")
+    return True
+
+
+def _verify_jdk() -> bool:
+    """Verify the default pinned OpenJDK 25 bin path (shortcut for diagnostics)."""
+    return _verify_jdk_at(JDK_BIN)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 4  DIAGNOSTICS / PORTABLEMC HELPERS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def collect_portablemc_diagnostics(python_exe, env=None):
     """Collect portablemc install diagnostics for dumps."""
     diagnostics = {}
@@ -327,7 +569,10 @@ def collect_portablemc_diagnostics(python_exe, env=None):
     return diagnostics
 
 
-# --- OS and architecture detection (for portablemc binary) ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 5  OS / ARCH DETECTION  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 SYSTEM = platform.system().lower()
 MACHINE = platform.machine().lower()
 
@@ -370,13 +615,16 @@ def get_portablemc_url():
     return base + filename
 
 
-# --- Data functions ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 6  DATA / JUNCTION HELPERS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def prepare_user_data():
     """Move static folder and game files to BASE_DIR if not already present."""
     base_dir = BASE_DIR
     root_dir = ROOT_DIR
 
-    # Static folder
     src_static = root_dir / "static"
     dst_static = base_dir / "static"
     if src_static.exists() and src_static.is_dir() and not dst_static.exists():
@@ -388,7 +636,6 @@ def prepare_user_data():
     elif dst_static.exists():
         print("ℹ️ Static folder already exists in %LOCALAPPDATA%\\PortableMC")
 
-    # Game files
     for filename in ["servers.dat", "options.txt"]:
         src = root_dir / filename
         dst = base_dir / filename
@@ -402,7 +649,6 @@ def prepare_user_data():
             print(f"ℹ️ {filename} already exists in %LOCALAPPDATA%\\PortableMC")
 
 
-# --- Junction functions ---
 def is_junction(path):
     """Return True if path is a junction (reparse point)."""
     try:
@@ -413,38 +659,35 @@ def is_junction(path):
 
 
 def create_junction(source, target):
-    """
-    Create a junction from source to target.
-    Safely removes any existing target before creating the junction.
-    Returns True if a junction was created, False otherwise (fallback to regular directory).
-    """
+    """Create a junction from source to target."""
     source_path = Path(source).resolve()
     target_path = Path(target).resolve()
 
-    # Prevent self‑junction
     if source_path == target_path:
         print(
             f"⚠️ Source and target are the same ({source_path}); skipping junction creation."
         )
-        # Still ensure the target directory exists (as a regular folder)
-        target_path.mkdir(parents=True, exist_ok=True)
+        try:
+            target_path.mkdir(parents=True, exist_ok=True)
+        except OSError as mkdir_exc:
+            print(f"Could not create fallback directory {target_path}: {mkdir_exc}")
         return False
 
-    # Ensure source exists
     source_path.mkdir(parents=True, exist_ok=True)
 
-    # Remove existing target if it exists
     if target_path.exists():
         if is_junction(target_path):
-            os.rmdir(str(target_path))  # removes only the junction
+            os.rmdir(str(target_path))
             print(f"Removed existing junction: {target_path}")
         elif target_path.is_dir():
+            shutil.copytree(str(target_path), str(source_path), dirs_exist_ok=True)
             shutil.rmtree(str(target_path), ignore_errors=True)
-            print(f"Removed existing directory: {target_path}")
+            print(f"Merged and removed existing directory: {target_path}")
         else:
+            if not source_path.exists():
+                shutil.copy2(str(target_path), str(source_path))
             target_path.unlink()
 
-    # Try to create junction
     try:
         subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(target_path), str(source_path)],
@@ -466,12 +709,27 @@ def create_junction(source, target):
 
 
 def ensure_junctions():
-    r"""Ensure mods/resourcepacks links target active runtime base directory."""
-    base_dir = ACTIVE_TRUSTED_DIR or BASE_DIR
-    base_dir.mkdir(parents=True, exist_ok=True)
+    r"""Ensure project-managed folders link into the active runtime base directory."""
+    runtime_dirs = []
+    for candidate in (LOCAL_BASE_DIR, BASE_DIR, ACTIVE_TRUSTED_DIR):
+        if not candidate:
+            continue
+        candidate = Path(candidate)
+        if not any(
+            existing.resolve() == candidate.resolve() for existing in runtime_dirs
+        ):
+            runtime_dirs.append(candidate)
 
-    create_junction(ROOT_DIR / "mods", base_dir / "mods")
-    create_junction(ROOT_DIR / "resourcepacks", base_dir / "resourcepacks")
+    for base_dir in runtime_dirs:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        create_junction(ROOT_DIR / "mods", base_dir / "mods")
+        create_junction(ROOT_DIR / "resourcepacks", base_dir / "resourcepacks")
+        create_junction(ROOT_DIR / "config", base_dir / "config")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 7  DEBUG / HARNESS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _run_harness_probe(name, cmd, cwd=None, timeout=8):
@@ -606,12 +864,14 @@ def run_debug_menu():
         print("=" * 60)
         print("1) Remove mods link")
         print("2) Remove resourcepacks link")
-        print("3) Remove all managed links")
-        print("4) Clear trusted mirror cache/logs")
-        print("5) Print effective config")
-        print("6) Run trusted-dir probes only")
-        print("7) Advanced restricted-env test harness")
-        print("8) Toggle sensitive env fields in dumps")
+        print("3) Remove config link")
+        print("4) Remove all managed links")
+        print("5) Clear trusted mirror cache/logs")
+        print("6) Print effective config")
+        print("7) Run trusted-dir probes only")
+        print("8) Advanced restricted-env test harness")
+        print("9) Toggle sensitive env fields in dumps")
+        print("10) In-process dependency check")
         print("b) Back")
         choice = input("Select debug option: ").strip().lower()
 
@@ -620,6 +880,18 @@ def run_debug_menu():
         elif choice == "2":
             remove_managed_link(BASE_DIR / "resourcepacks")
         elif choice == "3":
+            remove_managed_link(BASE_DIR / "config")
+        elif choice == "4":
+            if (
+                input("Confirm remove all managed links? (yes/no): ").strip().lower()
+                == "yes"
+            ):
+                links = list(LAUNCHER_STATE.get("managed_links", {}).keys())
+                for link in links:
+                    remove_managed_link(link)
+                update_launcher_state(managed_links={})
+                print("Managed links removed.")
+        elif choice == "__disabled_old_3":
             if (
                 input("Confirm remove all managed links? (yes/no): ").strip().lower()
                 == "yes"
@@ -629,7 +901,7 @@ def run_debug_menu():
                     remove_managed_link(link)
                 update_launcher_state(managed_links={})
                 print("✅ Managed links removed.")
-        elif choice == "4":
+        elif choice == "5":
             if ACTIVE_TRUSTED_DIR:
                 for name in ("logs", "portablemc_bin", "python"):
                     p = ACTIVE_TRUSTED_DIR / name
@@ -641,25 +913,51 @@ def run_debug_menu():
                 print("✅ Trusted cache/logs cleanup attempted.")
             else:
                 print("ℹ️ No trusted directory selected.")
-        elif choice == "5":
-            print(json.dumps(LAUNCHER_STATE, indent=2, sort_keys=True))
         elif choice == "6":
+            print(json.dumps(LAUNCHER_STATE, indent=2, sort_keys=True))
+        elif choice == "7":
             selected, candidates, probes = _resolve_trusted_dir(LAUNCHER_STATE)
             print(f"Selected trusted dir: {selected}")
             print(json.dumps({str(k): v for k, v in probes.items()}, indent=2))
-        elif choice == "7":
-            run_restricted_env_test_harness()
         elif choice == "8":
+            run_restricted_env_test_harness()
+        elif choice == "9":
             current = bool(LAUNCHER_STATE.get("include_sensitive_env_details", False))
             update_launcher_state(include_sensitive_env_details=not current)
             print(f"Sensitive env fields in dumps: {not current}")
+        elif choice == "10":
+            # In-process dependency diagnostic
+            print("\n--- In-Process Dependency Check ---")
+            _ensure_scripts_on_path()
+            for mod in ["pythonmemorymodule", "jpype", "jpype.imports"]:
+                ok = _check_importable(mod)
+                print(f"  {'✅' if ok else '❌'} {mod}")
+            mem_bin = resolve_effective_launcher_jdk_bin(memory_resident=True)
+            mem_jvm = mem_bin / "server" / "jvm.dll"
+            if not mem_jvm.is_file():
+                mem_jvm = mem_bin / "jvm.dll"
+            os_jvm = JDK_BIN / "server" / "jvm.dll"
+            if not os_jvm.is_file():
+                os_jvm = JDK_BIN / "jvm.dll"
+            print(f"  {'✅' if os_jvm.exists() else '❌'} option 4 JVM @ {os_jvm}")
+            print(
+                f"  {'✅' if mem_jvm.exists() else '❌'} option 5 JVM @ {mem_jvm} (bin {mem_bin})"
+            )
+            print(f"  {'✅' if JVM_BOOT_GLUE_PY.exists() else '❌'} jvm_boot_glue.py")
+            print(
+                f"  {'✅' if JVM_MEMORY_LOADER_PY.exists() else '❌'} jvm_memory_loader.py"
+            )
         elif choice in ("b", "q"):
             return
         else:
             print("Invalid debug choice.")
 
 
-# --- Download functions ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 8  DOWNLOAD / SSL HELPERS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def get_ssl_context():
     """Return an unverified SSL context if ALLOW_INSECURE_SSL is True, else None."""
     if ALLOW_INSECURE_SSL:
@@ -699,38 +997,67 @@ def download_file(url, dest_path):
             return False
 
 
-# --- Helper functions ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 9  MSBUILD CANDIDATE DETECTION  (unchanged)
+# ═══════════════════════���═══════════════════════════════════════════════════════
+
+
+def _add_msbuild_candidate(candidates, path, priority):
+    path = os.fspath(path)
+    if os.path.isfile(path):
+        candidates.append((path, priority))
+
+
+def _add_msbuild_candidates_from_vs_install(candidates, install_path, priority):
+    if not install_path:
+        return
+    root = Path(install_path)
+    for relative in (
+        Path("MSBuild") / "Current" / "Bin" / "MSBuild.exe",
+        Path("MSBuild") / "15.0" / "Bin" / "MSBuild.exe",
+    ):
+        _add_msbuild_candidate(candidates, root / relative, priority)
+
+
+def _add_msbuild_candidates_from_python_vswhere(candidates):
+    try:
+        import vswhere  # type: ignore[import]
+    except ImportError:
+        return
+
+    query_sets = (
+        {
+            "products": "*",
+            "requires": "Microsoft.Component.MSBuild",
+            "prop": "installationPath",
+        },
+        {"products": "*", "prop": "installationPath"},
+    )
+    for kwargs in query_sets:
+        try:
+            for entry in vswhere.find(legacy=True, **kwargs):
+                install_path = (
+                    entry.get("installationPath") if isinstance(entry, dict) else entry
+                )
+                _add_msbuild_candidates_from_vs_install(candidates, install_path, 110)
+        except Exception:
+            continue
+
+    try:
+        _add_msbuild_candidates_from_vs_install(
+            candidates, vswhere.get_latest_path(products="*"), 109
+        )
+    except Exception:
+        pass
+
+
 def find_msbuild_candidates():
     """Return a list of candidate MSBuild.exe paths sorted by priority (highest first)."""
     candidates = []
 
-    # 1. vswhere (most reliable, finds the latest Visual Studio)
-    vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-    if os.path.isfile(vswhere):
-        try:
-            result = subprocess.run(
-                [
-                    vswhere,
-                    "-latest",
-                    "-products",
-                    "*",
-                    "-find",
-                    "MSBuild\\**\\Bin\\MSBuild.exe",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if line and os.path.isfile(line):
-                        candidates.append((line, 100))  # highest priority
-        except Exception:
-            pass
+    _add_msbuild_candidates_from_python_vswhere(candidates)
 
-    # 2. Hard‑coded candidates with descending priorities
     hardcoded = [
-        # Visual Studio 2026 (v18.0)
         (
             r"C:\Program Files\Microsoft Visual Studio\2026\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
             99,
@@ -747,7 +1074,6 @@ def find_msbuild_candidates():
             r"C:\Program Files\Microsoft Visual Studio\2026\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
             99,
         ),
-        # Visual Studio 2022 (v17.0)
         (
             r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
             90,
@@ -764,7 +1090,22 @@ def find_msbuild_candidates():
             r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
             90,
         ),
-        # Visual Studio 2019 (v16.0)
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+            89,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+            89,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+            89,
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+            89,
+        ),
         (
             r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
             80,
@@ -781,7 +1122,6 @@ def find_msbuild_candidates():
             r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
             80,
         ),
-        # Visual Studio 2017 (v15.0)
         (
             r"C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\MSBuild\15.0\Bin\MSBuild.exe",
             70,
@@ -798,27 +1138,27 @@ def find_msbuild_candidates():
             r"C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\MSBuild.exe",
             70,
         ),
-        # Standalone Build Tools (v14.0, v12.0)
         (r"C:\Program Files (x86)\MSBuild\14.0\Bin\MSBuild.exe", 60),
         (r"C:\Program Files (x86)\MSBuild\12.0\Bin\MSBuild.exe", 50),
-        # .NET Framework (64‑bit preferred, then 32‑bit)
         (r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe", 40),
         (r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe", 30),
     ]
 
     for path, prio in hardcoded:
-        if os.path.isfile(path):
-            candidates.append((path, prio))
+        _add_msbuild_candidate(candidates, path, prio)
 
-    # Remove duplicates (keep highest priority for each path)
     unique = {}
     for path, prio in candidates:
         if path not in unique or prio > unique[path]:
             unique[path] = prio
 
-    # Sort by priority descending and return only paths
     sorted_candidates = sorted(unique.items(), key=lambda x: x[1], reverse=True)
     return [path for path, _ in sorted_candidates]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 10  EMBEDDED PYTHON SETUP  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def ensure_embedded_python():
@@ -893,7 +1233,6 @@ def setup_embedded_python():
     if not test_embedded_python():
         return False
 
-    # Ensure pip is available
     env_check = os.environ.copy()
     env_check["PYTHONNOUSERSITE"] = "1"
     env_check["PYTHONPATH"] = ""
@@ -932,7 +1271,7 @@ def download_get_pip():
 
     print("📥 Downloading get-pip.py (ignoring SSL cert for this request)...")
     try:
-        context = get_ssl_context()  # from earlier (secure or insecure)
+        context = get_ssl_context()
         with urllib.request.urlopen(GET_PIP_URL, context=context) as response:
             with open(pip_script, "wb") as out_file:
                 out_file.write(response.read())
@@ -1117,7 +1456,6 @@ def download_portablemc_binary():
         return False
     finally:
         archive_path.unlink(missing_ok=True)
-    # Flatten subdirectories
     for item in PORTABLEMC_BIN_DIR.iterdir():
         if item.is_dir():
             for sub in item.iterdir():
@@ -1129,7 +1467,6 @@ def download_portablemc_binary():
 
 def test_portablemc(python_exe=None):
     """Check if portablemc is available (binary, uvx, or module)."""
-    # Try binary first
     exe_name = "portablemc.exe" if SYSTEM == "windows" else "portablemc"
     binary_path = PORTABLEMC_BIN_DIR / exe_name
     if binary_path.exists():
@@ -1151,7 +1488,6 @@ def test_portablemc(python_exe=None):
         except (subprocess.TimeoutExpired, FileNotFoundError):
             print("⏱️ portablemc binary check timed out or not found, trying module.")
 
-    # Try uvx
     try:
         result = subprocess.run(
             ["uvx", "portablemc", "--help"], capture_output=True, text=True, timeout=8
@@ -1162,7 +1498,6 @@ def test_portablemc(python_exe=None):
     except Exception:
         pass
 
-    # Try module
     if python_exe is None:
         python_exe = EMBEDDED_PYTHON
     env = os.environ.copy()
@@ -1197,6 +1532,11 @@ def ensure_portablemc(python_exe=None):
         if method:
             return method
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 11  DIAGNOSTICS / FAILURE DUMPS  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def collect_system_details():
@@ -1324,11 +1664,7 @@ def write_failure_dump(
 
 
 def run_command_live(cmd, env=None, cwd=None, timeout=1800):
-    """Run a command, stream output live, and capture it for diagnostics.
-
-    ``timeout`` (default 30 min) caps the total wall-clock time. If the child
-    process has not exited by then it is killed and a TimeoutError is raised.
-    """
+    """Run a command, stream output live, and capture it for diagnostics."""
     import threading
 
     output_lines = []
@@ -1372,12 +1708,13 @@ def run_command_live(cmd, env=None, cwd=None, timeout=1800):
         raise
 
 
-# --- System Python detection ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 12  SYSTEM PYTHON DETECTION  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def get_system_python():
-    """Find a system Python 3.x executable, preferring 3.11 or higher.
-    Returns the path to a usable Python interpreter, or None.
-    Priority order: current interpreter, PATH, registry, common install paths.
-    """
+    """Find a system Python 3.x executable, preferring 3.11 or higher."""
     candidates = []
     seen = set()
 
@@ -1387,17 +1724,19 @@ def get_system_python():
             seen.add(p)
             candidates.append(p)
 
-    # 1. Current interpreter (if it's not embedded)
     current = Path(sys.executable)
     if current != EMBEDDED_PYTHON and not str(current).startswith(str(BASE_DIR)):
         add_candidate(current)
 
-    # 2. Search PATH
+    wl = shutil.which("py.exe") or shutil.which("py")
+    if wl:
+        add_candidate(wl)
+
     for dir in os.environ.get("PATH", "").split(os.pathsep):
+        add_candidate(Path(dir) / "py.exe")
         add_candidate(Path(dir) / "python.exe")
         add_candidate(Path(dir) / "python3.exe")
 
-    # 3. Registry
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         try:
             key = winreg.OpenKey(hive, r"Software\Python\PythonCore")
@@ -1415,7 +1754,6 @@ def get_system_python():
                 break
         winreg.CloseKey(key)
 
-    # 4. Common install locations
     for ver in PYTHON_VERSIONS:
         num = ver.replace(".", "")
         for base in (
@@ -1433,7 +1771,6 @@ def get_system_python():
     add_candidate(r"C:\Windows\Sysnative\python.exe")
     add_candidate(r"C:\Windows\System32\python.exe")
 
-    # Verify candidates
     valid = []
     for p in candidates:
         try:
@@ -1458,11 +1795,16 @@ def get_system_python():
     return best
 
 
-# --- Launcher functions ---
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 13  LAUNCHER DISPATCH — launch_launcher()
+#        Updated to propagate in-process env vars to pmc_web.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def launch_launcher(method, python_exe=None, extra_env=None):
     launcher_script = PORTABLEMC_PY
     if not launcher_script.exists():
-        print("❌ portablemc.py not found in the same directory.")
+        print("❌ pmc_web.py not found in scripts/.")
         return False
 
     if python_exe is None:
@@ -1472,21 +1814,28 @@ def launch_launcher(method, python_exe=None, extra_env=None):
     if extra_env:
         env.update(extra_env)
 
-    # Ensure paths for binaries (portablemc binary may be in PORTABLEMC_BIN_DIR)
     paths = [str(EMBEDDED_DIR), str(EMBEDDED_DIR / "Scripts"), str(PORTABLEMC_BIN_DIR)]
     env["PATH"] = os.pathsep.join(paths) + os.pathsep + env.get("PATH", "")
     env["__COMPAT_LAYER"] = "RUNASINVOKER"
     env["LAUNCHER_ROOT"] = str(ROOT_DIR)
 
-    # For embedded Python, set PYTHONHOME; for system Python, do not force isolation
     if python_exe == EMBEDDED_PYTHON:
         env["PYTHONHOME"] = str(EMBEDDED_DIR)
         env["PYTHONNOUSERSITE"] = "1"
-    # else: extra_env already contains PYTHONUSERBASE and PYTHONNOUSERSITE="0"
 
     env["CLICOLOR_FORCE"] = "1"
     env["PYTHONPATH"] = ""
     env["PORTABLEMC_METHOD"] = method
+
+    # ── In-process env vars forwarded to pmc_web.py ────────────────────────
+    # pmc_web.py can inspect LAUNCHER_INPROCESS to decide whether to use
+    # the in-process launch path (jvm_boot_glue) instead of a portablemc CLI
+    # subprocess.  JDK_BIN_PATH and PMC_SCRIPTS_DIR let it locate the glue.
+    env["JDK_BIN_PATH"] = str(JDK_BIN)
+    env["PMC_SCRIPTS_DIR"] = str(SCRIPTS_DIR)
+    env["PMC_MAIN_DIR"] = str(BASE_DIR)
+    # LAUNCHER_INPROCESS is deliberately NOT set here — web/cli modes keep
+    # the existing subprocess model.  run_inprocess_launcher() sets it directly.
 
     cert_path = get_certifi_path(python_exe)
     if cert_path:
@@ -1505,12 +1854,15 @@ def launch_launcher(method, python_exe=None, extra_env=None):
     return True
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 14  WEB LAUNCHER  (unchanged logic, extra env vars added via launch_launcher)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def run_web_launcher():
     """Attempt to use embedded Python; if blocked, fall back to system Python."""
     print("\n=== Bootstrapping environment for web launcher ===\n")
-    # Move static folders and game files before launch
     prepare_user_data()
-    # Try embedded Python
     if setup_embedded_python():
         print("✅ Embedded Python is usable.")
         if not install_base_packages(EMBEDDED_PYTHON):
@@ -1518,27 +1870,23 @@ def run_web_launcher():
         method = ensure_portablemc(EMBEDDED_PYTHON)
         if not method:
             return False
-        print("✅ Setup complete. Launching portablemc.py with embedded Python...")
+        print("✅ Setup complete. Launching pmc_web.py with embedded Python...")
         return launch_launcher(method, EMBEDDED_PYTHON)
 
-    # Embedded Python failed; fall back to system Python
     print("\n⚠️ Embedded Python not usable. Trying system Python...")
     sys_python = get_system_python()
     if not sys_python:
         print("❌ No system Python found. Cannot proceed.")
         return False
 
-    # Create a user-specific directory for Python packages (to avoid admin rights)
     user_appdata = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
     launcher_python_dir = user_appdata / "PythonLauncher"
     launcher_python_dir.mkdir(exist_ok=True)
 
-    # Set up environment to use this directory for site-packages
     env = os.environ.copy()
     env["PYTHONUSERBASE"] = str(launcher_python_dir)
     env["PYTHONNOUSERSITE"] = "0"
     env["PYTHONPATH"] = ""
-    # Install packages with system Python
     print("📦 Installing required packages with system Python...")
     for pkg in BASE_PACKAGES + ["portablemc"]:
         print(f"   Installing {pkg}...")
@@ -1551,7 +1899,6 @@ def run_web_launcher():
             f"   ✅ {pkg} installed via {LAUNCHER_STATE.get('installer_backend', 'pip')}."
         )
 
-    # Test portablemc with system Python
     method = test_portablemc(sys_python)
     if not method:
         diag = collect_portablemc_diagnostics(sys_python, env=env)
@@ -1565,14 +1912,18 @@ def run_web_launcher():
         print("❌ portablemc not available even after installation.")
         return False
 
-    print("✅ Setup complete. Launching portablemc.py with system Python...")
-    # Launch portablemc.py with system Python, using the same environment
+    print("✅ Setup complete. Launching pmc_web.py with system Python...")
     extra_env = {
         "PYTHONUSERBASE": str(launcher_python_dir),
         "PYTHONNOUSERSITE": "0",
-        "PATH": os.environ["PATH"],  # keep the original PATH
+        "PATH": os.environ["PATH"],
     }
     return launch_launcher(method, sys_python, extra_env)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 15  MSBUILD LAUNCHER  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def run_msbuild_launcher():
@@ -1666,6 +2017,11 @@ def run_msbuild_launcher():
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 16  CLI LAUNCHER  (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def run_cli_launcher():
     """Launch portablemc in CLI mode using the embedded Python (or system Python fallback)."""
     print("\n=== Bootstrapping environment for CLI launcher ===\n")
@@ -1676,9 +2032,7 @@ def run_cli_launcher():
         "username": DEFAULT_USERNAME,
     }
 
-    # Try embedded Python first
     if setup_embedded_python():
-        # Install portablemc (and certifi for SSL) into embedded Python
         method = install_portablemc_via_embedded()
         if not method:
             dump = write_failure_dump(
@@ -1690,7 +2044,6 @@ def run_cli_launcher():
                 print(f"📝 Failure dump written: {dump}")
             return False
 
-        # Install certifi to get CA bundle
         print("📦 Installing certifi for SSL support...")
         if not install_packages_with_fallback(
             ["certifi"], isolated=True, python_exe=EMBEDDED_PYTHON
@@ -1699,13 +2052,9 @@ def run_cli_launcher():
         else:
             print("✅ certifi installed.")
 
-        # Get certifi CA bundle path
         cert_path = get_certifi_path(EMBEDDED_PYTHON)
-
-        # Create junctions (if not already done)
         ensure_junctions()
 
-        # Build CLI arguments (portablemc syntax)
         jvm_arg_tokens = [arg for arg in DEFAULT_JVM_OPTS.split() if arg.strip()]
         portablemc_args = [
             "--main-dir",
@@ -1766,7 +2115,6 @@ def run_cli_launcher():
             print(f"❌ CLI launcher exited with error: {e}")
             return False
 
-    # Fallback to system Python
     print("\n⚠️ Embedded Python not usable. Trying system Python...")
     sys_python = get_system_python()
     if not sys_python:
@@ -1787,7 +2135,6 @@ def run_cli_launcher():
     env["PYTHONNOUSERSITE"] = "0"
     env["PYTHONPATH"] = ""
 
-    # Install portablemc and certifi with system Python
     print("📦 Installing portablemc with system Python...")
     if not install_packages_with_fallback(
         ["portablemc", "certifi"], python_exe=sys_python, isolated=False, user=True
@@ -1824,8 +2171,7 @@ def run_cli_launcher():
         print("❌ portablemc not available after installation.")
         return False
 
-    cert_path = get_certifi_path(sys_python)  # certifi should now be installed
-
+    cert_path = get_certifi_path(sys_python)
     ensure_junctions()
 
     jvm_arg_tokens = [arg for arg in DEFAULT_JVM_OPTS.split() if arg.strip()]
@@ -1885,39 +2231,358 @@ def run_cli_launcher():
         return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 17  IN-PROCESS LAUNCHER  ← NEW
+#        Loads jvm.dll into RAM via PythonMemoryModule, boots the JVM through
+#        JPype's IAT-hooked startJVM(), and runs the Minecraft main class
+#        entirely in the current Python process.  No java.exe is spawned.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def run_inprocess_launcher(
+    memory_resident: bool = False,
+    portablemc_inmemory: bool = False,
+):
+    """
+    Memory-resident JVM launcher — the entire game runs inside this process.
+
+    Boot sequence
+    -------------
+    1. Validate JDK path and glue scripts exist on disk.
+    2. Add scripts/ to sys.path so jvm_boot_glue and jvm_memory_loader are
+       importable, and so pythonmemorymodule (bundled in scripts/) is too.
+    3. Ensure jpype1 is installed (pip install if absent).
+    4. Prepare game data directories and junctions.
+    5. Import launch_minecraft from jvm_boot_glue and call it.
+       Inside that call:
+         a) JvmMemoryLoader maps verify.dll → jli.dll → java.dll → jvm.dll
+            into VirtualAlloc'd buffers and resolves JNI_CreateJavaVM.
+         b) JvmBootGlue patches _jpype.pyd's IAT (LoadLibraryW +
+            GetProcAddress) to intercept the JVM load.
+         c) jpype.startJVM() is called — C++ gets the fake HINSTANCE,
+            calls our JNI_CreateJavaVM trampoline → JVM boots from RAM.
+         d) IAT is restored; JPype is fully operational.
+         e) jpype.JClass(main_class).main(game_args[:]) is called.
+            Minecraft runs. This call blocks until the game exits.
+
+    No .exe files are spawned at any point in this path.
+
+    Parameters
+    ----------
+    memory_resident : bool
+        If True, load jvm.dll into memory using pythonmemorymodule instead
+        of the normal OS loader path.
+    portablemc_inmemory : bool
+        If True, load the _portablemc.pyd extension in-memory using
+        pythonmemorymodule.  This is useful for environments with strict
+        .exe/.dll execution policies.
+    """
+    print("\n" + "=" * 62)
+    env_memory_resident = (
+        os.environ.get("LAUNCHER_MEMORY_JVM", "").strip().lower() in TRUTHY_ENV_VALUES
+    )
+    env_portablemc_inmemory = (
+        os.environ.get("LAUNCHER_PORTABLEMC_INMEMORY", "").strip().lower()
+        in TRUTHY_ENV_VALUES
+    )
+    memory_resident = bool(memory_resident or env_memory_resident)
+    portablemc_inmemory = bool(portablemc_inmemory or env_portablemc_inmemory)
+    mode_name = "inprocess_memory" if memory_resident else "inprocess_jpype"
+    effective_jdk_bin = resolve_effective_launcher_jdk_bin(memory_resident=memory_resident)
+
+    def _enable_inprocess_crash_log() -> None:
+        """
+        Enable Python faulthandler early so native crashes during manual-mapped
+        DLL bootstrap are captured (even before jvm_boot_glue imports).
+        The file is truncated each run because HotSpot uses handled AVs for
+        null-pointer checks; we only care about fatal unhandled crashes.
+        """
+        try:
+            import faulthandler
+            import time
+
+            d = ROOT_DIR / "logs"
+            d.mkdir(parents=True, exist_ok=True)
+            log_path = d / "python_native_crash.log"
+            f = log_path.open("w", encoding="utf-8")
+            f.write(
+                f"=== main.py in-process crash capture {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+            )
+            f.flush()
+            faulthandler.enable(file=f, all_threads=True)
+        except Exception:
+            pass
+
+    _enable_inprocess_crash_log()
+    print("   In-Process Launcher  (JPype JVM, no java.exe)")
+    print("=" * 62 + "\n")
+
+    prepare_user_data()
+    ensure_junctions()
+
+    # ── 1. Verify JDK and glue scripts ────────────────────────────────────
+    print("[ 1/4 ] Verifying JDK and glue scripts…")
+    if memory_resident and effective_jdk_bin.resolve() == JDK_BIN.resolve():
+        print(
+            "ℹ️  java-runtime-epsilon not detected — falling back to OpenJDK25 for manual map."
+        )
+    if not _verify_jdk_at(effective_jdk_bin):
+        dump = write_failure_dump(
+            "inprocess",
+            f"JDK not found or jvm.dll missing at {effective_jdk_bin}",
+            extra={"jdk_bin": str(effective_jdk_bin), "mode": mode_name},
+        )
+        if dump:
+            print(f"📝 Failure dump: {dump}")
+        return False
+
+    for script in (JVM_BOOT_GLUE_PY, JVM_MEMORY_LOADER_PY):
+        if not script.exists():
+            msg = f"Required script missing: {script}"
+            print(f"❌ {msg}")
+            write_failure_dump("inprocess", msg, extra={"mode": mode_name})
+            return False
+    print("✅ All glue scripts present.\n")
+
+    # ── 2 & 3. Dependencies ────────────────────────────────────────────────
+    print("[ 2/4 ] Bootstrapping in-process dependencies…")
+    if not _bootstrap_inprocess_deps():
+        dump = write_failure_dump(
+            "inprocess",
+            "Failed to satisfy in-process dependencies (jpype1 / pythonmemorymodule).",
+            extra={"mode": mode_name},
+        )
+        if dump:
+            print(f"📝 Failure dump: {dump}")
+        return False
+    print()
+
+    # ── 4. Import glue ────────────────────────────────────────────────────
+    print("[ 3/4 ] Importing jvm_boot_glue…")
+    try:
+        from jvm_boot_glue import launch_minecraft  # type: ignore[import]
+    except ImportError as exc:
+        msg = f"Cannot import jvm_boot_glue: {exc}"
+        print(f"❌ {msg}")
+        write_failure_dump("inprocess", msg, exc=exc, extra={"mode": mode_name})
+        return False
+    print("✅ jvm_boot_glue imported.\n")
+
+    # ── 5. Launch ──────────────────────────────────────────────────────────
+    print("[ 4/4 ] Booting JVM and launching Minecraft…")
+    print(f"        version  : {INPROCESS_VERSION}")
+    print(f"        username : {DEFAULT_USERNAME}")
+    print(f"        server   : {DEFAULT_SERVER_IP}")
+    print(f"        jdk_bin  : {effective_jdk_bin}")
+    print(f"        main_dir : {BASE_DIR}")
+    print(f"        jvm_load : {'memory-resident' if memory_resident else 'os-loader'}")
+    print(f"        pmc_load : {'in-memory' if portablemc_inmemory else 'standard'}")
+    print()
+
+    # Build extra JVM flags: DEFAULT_JVM_OPTS tokens + auto-join server flag.
+    # portablemc will supply -Djava.library.path and -cp via its Game struct;
+    # we only add user-facing heap / GC flags here.
+    jvm_flags = [tok for tok in DEFAULT_JVM_OPTS.split() if tok.strip()]
+
+    # Auto-join the configured server at startup.
+    # Fabric / vanilla 1.6+ support --server and --port as game args; we pass
+    # them through PortableMCGameAdapter.resolve() → game_args automatically
+    # when portablemc includes them.  As an extra safety net we append them
+    # here as well; duplicates are harmless.
+    extra_game_args: list[str] = []
+    if DEFAULT_SERVER_IP:
+        extra_game_args += ["--server", DEFAULT_SERVER_IP]
+
+    try:
+        launch_minecraft(
+            jdk_bin=effective_jdk_bin,
+            main_dir=BASE_DIR,
+            version=INPROCESS_VERSION,
+            username=DEFAULT_USERNAME,
+            access_token="0",  # offline-mode token
+            extra_jvm_flags=jvm_flags,
+            extra_game_args=extra_game_args,
+            debug=bool(
+                os.environ.get("LAUNCHER_VERBOSE", "").strip().lower()
+                in TRUTHY_ENV_VALUES
+            ),
+            memory_resident=memory_resident,
+            portablemc_inmemory=portablemc_inmemory,
+        )
+        print("\n✅ Minecraft exited normally.")
+        return True
+
+    except KeyboardInterrupt:
+        print("\n[HALT] In-process launcher interrupted by user.")
+        return True  # not a failure
+
+    except Exception as exc:
+        msg = f"In-process launcher raised: {type(exc).__name__}: {exc}"
+        print(f"\n❌ {msg}")
+        dump = write_failure_dump(
+            "inprocess",
+            msg,
+            exc=exc,
+            extra={
+                "mode": mode_name,
+                "jdk_bin": str(effective_jdk_bin),
+                "version": INPROCESS_VERSION,
+                "username": DEFAULT_USERNAME,
+                "memory_resident": memory_resident,
+                "portablemc_inmemory": portablemc_inmemory,
+            },
+        )
+        if dump:
+            print(f"📝 Failure dump: {dump}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# § 18  MAIN  — updated menu (option 4 = in-process, d = debug)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _read_main_menu_choice() -> str:
+    """
+    Read the main launcher menu.
+
+    Direct keys still work (1/2/3/4/5/d/q). On Windows consoles, Up/Down cycles
+    through the same choices and Enter accepts the highlighted item.
+    """
+    choices = ["1", "2", "3", "4", "5", "d", "q"]
+    labels = {
+        "1": "Web launcher",
+        "2": "MSBuild launcher",
+        "3": "CLI launcher",
+        "4": "In-Process JPype",
+        "5": "In-Process JPype + memory JVM",
+        "d": "Debug menu",
+        "q": "Quit",
+    }
+
+    def supports_msvcrt_key_stream() -> bool:
+        if os.name != "nt" or not sys.stdin.isatty():
+            return False
+        # IDLE and similar shells expose Python file-like stdin, not the
+        # low-level console key stream that msvcrt.getwch() needs.
+        stdin_module = type(sys.stdin).__module__.lower()
+        if "idlelib" in stdin_module or "_pyrepl" in stdin_module:
+            return False
+        try:
+            import ctypes
+            import msvcrt
+
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            mode = ctypes.c_uint()
+            return bool(
+                ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            )
+        except (AttributeError, ImportError, OSError, ValueError):
+            return False
+
+    if not supports_msvcrt_key_stream():
+        return input("\nEnter choice: ").strip().lower()
+
+    import msvcrt
+
+    selected = 0
+    print()
+
+    def redraw() -> None:
+        print(
+            f"\rEnter choice: {choices[selected]} ({labels[choices[selected]]})"
+            + " " * 24,
+            end="",
+            flush=True,
+        )
+
+    redraw()
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            print()
+            return choices[selected]
+        if ch in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            if code == "H":
+                selected = (selected - 1) % len(choices)
+                redraw()
+            elif code == "P":
+                selected = (selected + 1) % len(choices)
+                redraw()
+            continue
+
+        key = ch.lower()
+        if key in choices:
+            print(f"\rEnter choice: {key} ({labels[key]})" + " " * 24)
+            return key
+
+
 def main():
     initialize_runtime_configuration()
-    # Display menu
-    print("\n" + "=" * 60)
-    print("      Minecraft Launcher – Choose a Method")
-    print("=" * 60)
-    print("1) Web launcher (portablemc.py) – requires setup, runs in browser")
-    print("2) MSBuild launcher – uses Launcher.targets (Microsoft‑signed binaries)")
-    print("3) CLI launcher – runs portablemc directly in terminal")
-    print("q) Quit")
-    choice = input("\nEnter choice (1/2/3/q): ").strip()
+
+    print("\n" + "=" * 62)
+    print("         Minecraft Launcher  –  Choose a Method")
+    print("=" * 62)
+    print("  1)  Web launcher      – browser UI (Flask + pmc_web.py)")
+    print("  2)  MSBuild launcher  – Launcher.targets (signed binaries)")
+    print("  3)  CLI launcher      – portablemc in terminal")
+    print("  4)  In-Process        - JPype + OS-loaded JVM, no java.exe")
+    print("  5)  In-Process        - JPype + memory JVM, no java.exe")
+    print("  d)  Debug menu")
+    print("  q)  Quit")
+    print("=" * 62)
+    choice = _read_main_menu_choice()
 
     if choice == "1":
         update_launcher_state(last_run_mode="web")
         success = run_web_launcher()
+
     elif choice == "2":
         update_launcher_state(last_run_mode="msbuild")
         success = run_msbuild_launcher()
+
     elif choice == "3":
         update_launcher_state(last_run_mode="cli")
         success = run_cli_launcher()
+
     elif choice == "4":
+        update_launcher_state(last_run_mode="inprocess_jpype")
+        os.environ.pop("LAUNCHER_MEMORY_JVM", None)
+        # Enable portablemc in-memory loading for environments with strict
+        # .exe/.dll execution policies (can be toggled via env var)
+        pmc_inmem = (
+            os.environ.get("LAUNCHER_PORTABLEMC_INMEMORY", "").strip().lower()
+            in TRUTHY_ENV_VALUES
+        )
+        success = run_inprocess_launcher(
+            memory_resident=False, portablemc_inmemory=pmc_inmem
+        )
+
+    elif choice == "5":
+        update_launcher_state(last_run_mode="inprocess_memory")
+        os.environ["LAUNCHER_MEMORY_JVM"] = "1"
+        # In memory-resident mode, always enable portablemc in-memory loading
+        # as this mode is specifically for environments with strict exec policies
+        success = run_inprocess_launcher(
+            memory_resident=True, portablemc_inmemory=True
+        )
+
+    elif choice == "d":
         run_debug_menu()
         success = True
-    elif choice.lower() == "q":
+
+    elif choice == "q":
         print("Exiting.")
         sys.exit(0)
+
     else:
         print("Invalid choice. Exiting.")
         sys.exit(1)
 
     update_launcher_state(
-        success=bool(success), last_error="" if success else "launcher returned failure"
+        success=bool(success),
+        last_error="" if success else "launcher returned failure",
     )
     sys.exit(0 if success else 1)
 
