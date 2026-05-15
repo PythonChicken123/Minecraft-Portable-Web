@@ -1,12 +1,8 @@
 # Minecraft Portable Web Launcher
 
-A Python‑based Minecraft launcher that runs in a browser using [Flask](https://github.com/pallets/flask) and [PortableMC](https://github.com/mindstorm38/portablemc). Designed for restricted Windows environments where arbitrary `.exe` files are blocked. It uses multiple fallback mechanisms (C# compilation, PowerShell, VBScript) to bypass Group Policy restrictions if required.
+A Python‑based Minecraft launcher In-process JVM loading using JPype1 and PortableMC. Designed for restricted Windows environments where arbitrary `.exe` files are blocked.
 
 ![Preview](static/preview.jpg)
-
-> [!WARNING]
-> Usage of the MSBuild bypass method is for education, launcher portability, and system compatibility testing.
-> Do not use it for bypassing security policy without authorization.
 
 ## Features
 
@@ -41,12 +37,17 @@ Minecraft-Portable-Web/
 
 - Windows 10/11
 - Python 3.11+ (or the script will download an embedded Python 3.14).
+- (Optional) Maturin & PyO3 - used for portablemc api
 - (Optional) MSBuild (comes with .NET Framework 4.8) – used for the C# fallback.
 - (Optional) PowerShell 3.0+ – used as a fallback.
 - (Optional) VBScript support – used as a final fallback.
 
 ## TL;DR
-* Load all executables and dlls on the RAM, disk-less, undetectable
+* Cross-platform support (MacOS, Linux)
+* Local imports (PortableMC)
+* ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID (Stealth)
+* Proxy System (Bypass to access public servers)
+* Microsoft Auth System
 
 ## Getting Started
 
@@ -91,7 +92,7 @@ If you encounter any issues or have an idea to improve the launcher, please [ope
 ## License
 MIT
 
-## Libraries Used
+## Libraries Used (will be updated soon)
 * [PortableMC](https://github.com/mindstorm38/portablemc) – The Heart of The Launcher
 * [Flask](https://flask.palletsprojects.com/) & [Flask‑SocketIO](https://flask-socketio.readthedocs.io/) – Web Interface
 * [ansi2html](https://github.com/ralphbean/ansi2html) & [ansi_up](https://github.com/drudru/ansi_up) – ANSI colour conversion
